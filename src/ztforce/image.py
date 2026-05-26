@@ -1,0 +1,175 @@
+"""ZTFImage: FITS loading, SEP background, source extraction, WCS."""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+import sep
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.wcs import WCS, FITSFixedWarning
+
+from .config import ZTForceConfig
+from .exceptions import WCSError
+from .utils import nearest_odd_int
+
+# SEP tuning — must be set at module load before any extraction call
+sep.set_extract_pixstack(1_000_000)
+sep.set_sub_object_limit(4096)
+
+
+class ZTFImage:
+    """Lazy-loading wrapper around a single ZTF science FITS image."""
+
+    def __init__(self, fits_fpath: str, band: str, config: ZTForceConfig) -> None:
+        self._fpath = fits_fpath
+        self.band = band
+        self._config = config
+        self._hdul: fits.HDUList | None = None
+        self._data: np.ndarray | None = None
+        self._header: fits.Header | None = None
+        self._wcs: WCS | None = None
+        self._bkg: sep.Background | None = None
+        self._image_sub: np.ndarray | None = None
+        self._nan_mask: np.ndarray | None = None
+
+    # ── raw data ─────────────────────────────────────────────────────────────
+
+    @property
+    def header(self) -> fits.Header:
+        """FITS primary header."""
+        if self._header is None:
+            self._load_fits()
+        return self._header  # type: ignore[return-value]
+
+    @property
+    def data(self) -> np.ndarray:
+        """Image array as a native-endian float64."""
+        if self._data is None:
+            self._load_fits()
+        return self._data  # type: ignore[return-value]
+
+    def _load_fits(self) -> None:
+        hdul = fits.open(self._fpath)
+        hdr = hdul[0].header
+        # Astropy WCS requires RADESYS; older ZTF headers use RADECSYS
+        if "RADECSYS" in hdr and "RADESYS" not in hdr:
+            hdr.rename_keyword("RADECSYS", "RADESYS")
+        elif "RADECSYS" in hdr:
+            del hdr["RADECSYS"]
+        self._header = hdr
+        raw = hdul[0].data
+        self._data = np.ascontiguousarray(raw, dtype=np.float64)
+        hdul.close()
+
+    # ── derived scalar properties ─────────────────────────────────────────────
+
+    @property
+    def gain(self) -> float:
+        """Effective gain in e-/ADU."""
+        hdr = self.header
+        if "GAIN" in hdr:
+            return float(hdr["GAIN"])
+        if "NFRAMES" in hdr:
+            # Deep-stack convention from ZTF pipeline paper
+            return 5.8 * float(hdr["NFRAMES"])
+        return self._config.default_gain
+
+    @property
+    def fwhm(self) -> float:
+        """Median PSF FWHM in pixels from header."""
+        hdr = self.header
+        if "MEDFWHM" in hdr:
+            return float(hdr["MEDFWHM"])
+        return float(hdr["SEEING"])
+
+    @property
+    def zero_point(self) -> float:
+        """AB photometric zero-point from header (MAGZP)."""
+        return float(self.header["MAGZP"])
+
+    @property
+    def obs_jd(self) -> float:
+        """Observation Julian date."""
+        return float(self.header["OBSJD"])
+
+    @property
+    def mag_limit(self) -> float | None:
+        """5-sigma limiting magnitude from header, if present."""
+        v = self.header.get("MAGLIM")
+        return float(v) if v is not None else None
+
+    # ── WCS ──────────────────────────────────────────────────────────────────
+
+    @property
+    def wcs(self) -> WCS:
+        """Astropy WCS built from the image header."""
+        if self._wcs is None:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FITSFixedWarning)
+                    self._wcs = WCS(self.header)
+            except Exception as exc:
+                raise WCSError(f"Failed to build WCS for {self._fpath}: {exc}") from exc
+        return self._wcs
+
+    def sky_to_pixel(self, coord: SkyCoord) -> tuple[float, float]:
+        """Return (x, y) pixel position for a SkyCoord."""
+        try:
+            x, y = self.wcs.world_to_pixel(coord)
+            return float(x), float(y)
+        except Exception as exc:
+            raise WCSError(f"sky_to_pixel failed: {exc}") from exc
+
+    def pixel_to_sky(self, x: float, y: float) -> SkyCoord:
+        """Return a SkyCoord for pixel position (x, y)."""
+        try:
+            return self.wcs.pixel_to_world(x, y)
+        except Exception as exc:
+            raise WCSError(f"pixel_to_sky failed: {exc}") from exc
+
+    def footprint(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Return ((ra_min, ra_max), (dec_min, dec_max)) of the image footprint."""
+        ny, nx = self.data.shape
+        corners = [self.pixel_to_sky(x, y) for x, y in [(0, 0), (nx, 0), (nx, ny), (0, ny)]]
+        ras = [c.ra.deg for c in corners]
+        decs = [c.dec.deg for c in corners]
+        return (min(ras), max(ras)), (min(decs), max(decs))
+
+    # ── SEP background & extraction ───────────────────────────────────────────
+
+    @property
+    def nan_mask(self) -> np.ndarray:
+        """Boolean mask: True where pixel is NaN."""
+        if self._nan_mask is None:
+            self._nan_mask = ~np.isfinite(self.data)
+        return self._nan_mask
+
+    @property
+    def bkg(self) -> sep.Background:
+        """SEP background model (lazy, cached)."""
+        if self._bkg is None:
+            cfg = self._config
+            self._bkg = sep.Background(
+                self.data,
+                bw=cfg.sep_bw,
+                bh=cfg.sep_bh,
+                fw=cfg.sep_fw,
+                fh=cfg.sep_fh,
+                mask=self.nan_mask,
+            )
+        return self._bkg
+
+    @property
+    def image_sub(self) -> np.ndarray:
+        """Background-subtracted image array."""
+        if self._image_sub is None:
+            self._image_sub = self.data - self.bkg.back()
+        return self._image_sub
+
+    # ── PSF sizing ────────────────────────────────────────────────────────────
+
+    def psf_cutout_size(self) -> int:
+        """Odd integer cutout size for PSF extraction: nearest_odd_int(FWHM * factor)."""
+        return nearest_odd_int(self.fwhm * self._config.psf_cutout_fwhm_factor)

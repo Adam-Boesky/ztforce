@@ -296,6 +296,37 @@ def test_cache_hit_returns_correct_lightcurve(tmp_path, mock_config):
 # ── run_forced_photometry (no images) ─────────────────────────────────────────
 
 
+def test_force_recompute_ignores_cache(tmp_path, mock_config):
+    """force_recompute=True bypasses an existing cached lightcurve."""
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.exceptions import NoImagesFoundError
+    from ztforce.lightcurve import Lightcurve
+    from ztforce.pipeline import run_forced_photometry
+    from ztforce.utils import flux_to_ab_mag
+
+    cache = make_cache(tmp_path / "cache")
+    lc_path = lightcurve_path(cache, 150.0, 2.0, "g")
+    lc_path.parent.mkdir(parents=True, exist_ok=True)
+    lc_pre = Lightcurve(ra=150.0, dec=2.0)
+    mag, merr = flux_to_ab_mag(1000.0, 26.3, 50.0)
+    lc_pre.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, 26.3, 0)
+    lc_pre.save(lc_path)
+
+    with mock.patch("ztforce.pipeline.query_sci_metadata") as mock_query:
+        mock_query.side_effect = NoImagesFoundError("none")
+        result = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g"],
+            data_dir=tmp_path / "cache",
+            config=mock_config,
+            force_recompute=True,
+        )
+
+    mock_query.assert_called_once()
+    assert result == {}
+
+
 def test_no_images_returns_empty_dict(tmp_path, mock_config):
     """run_forced_photometry returns {} when query finds no images."""
     from ztforce.exceptions import NoImagesFoundError

@@ -167,6 +167,7 @@ def run_forced_photometry(
     n_download_workers: int = 4,
     n_psf_workers: int = 4,
     max_epochs: int | None = None,
+    force_recompute: bool = False,
 ) -> dict[str, Lightcurve]:
     """Run forced PSF photometry at (ra, dec) for all requested bands.
 
@@ -187,6 +188,8 @@ def run_forced_photometry(
         n_psf_workers: Number of parallel processes for PSF photometry.
         max_epochs: If set, process only the *most recent* ``max_epochs``
             exposures per band.  Useful for quick tests.
+        force_recompute: If ``True``, ignore any cached lightcurve and
+            redownload + recompute from scratch, overwriting the cache.
 
     Returns:
         Dict mapping band label (``"g"``, ``"r"``, ``"i"``) to a
@@ -203,7 +206,7 @@ def run_forced_photometry(
         lc_fpath = lightcurve_path(cache, ra, dec, band)
 
         # Cache hit: skip download + photometry entirely
-        if lc_fpath.exists():
+        if lc_fpath.exists() and not force_recompute:
             lightcurves[band] = Lightcurve.load(lc_fpath)
             continue
 

@@ -1,0 +1,188 @@
+"""Tests for ztforce.image (ZTFImage)."""
+
+import numpy as np
+import pytest
+
+
+def test_header_loaded(synthetic_fits_file, mock_config):
+    """ZTFImage.header returns the FITS header."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    assert "MAGZP" in img.header
+    assert "OBSJD" in img.header
+
+
+def test_data_shape(synthetic_fits_file, mock_config):
+    """ZTFImage.data returns a 2D float64 array."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.data.ndim == 2
+    assert img.data.dtype == np.float64
+
+
+def test_data_is_native_endian(synthetic_fits_file, mock_config):
+    """data array has native byte order (required by SEP)."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.data.flags["C_CONTIGUOUS"]
+    # Native endian: dtype should not have '>' or '<' prefix
+    assert img.data.dtype.byteorder in ("=", "|", "=")
+
+
+def test_scalar_properties(synthetic_fits_file, mock_config):
+    """gain, fwhm, zero_point, obs_jd, mag_limit are read from header."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.gain == pytest.approx(6.2)
+    assert img.fwhm == pytest.approx(3.0)
+    assert img.zero_point == pytest.approx(26.3)
+    assert img.obs_jd == pytest.approx(2459000.0)
+    assert img.mag_limit == pytest.approx(21.0)
+
+
+def test_gain_fallback_nframes(tmp_path, mock_config):
+    """gain falls back to 5.8 * NFRAMES when GAIN header is absent."""
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+
+    path = tmp_path / "nframes.fits"
+    hdr = fits.Header()
+    hdr["NFRAMES"] = 3
+    hdr["MAGZP"] = 26.3
+    hdr["OBSJD"] = 2459000.0
+    hdr["MEDFWHM"] = 3.0
+    hdr["RADESYS"] = "ICRS"
+    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
+
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.gain == pytest.approx(5.8 * 3)
+
+
+def test_gain_fallback_default(tmp_path, mock_config):
+    """gain falls back to config.default_gain when no GAIN or NFRAMES header."""
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+
+    path = tmp_path / "nogain.fits"
+    hdr = fits.Header()
+    hdr["MAGZP"] = 26.3
+    hdr["OBSJD"] = 2459000.0
+    hdr["MEDFWHM"] = 3.0
+    hdr["RADESYS"] = "ICRS"
+    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
+
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.gain == pytest.approx(mock_config.default_gain)
+
+
+def test_fwhm_falls_back_to_seeing(tmp_path, mock_config):
+    """fwhm uses SEEING when MEDFWHM is absent."""
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+
+    path = tmp_path / "seeing.fits"
+    hdr = fits.Header()
+    hdr["GAIN"] = 6.2
+    hdr["MAGZP"] = 26.3
+    hdr["OBSJD"] = 2459000.0
+    hdr["SEEING"] = 2.5
+    hdr["RADESYS"] = "ICRS"
+    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
+
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.fwhm == pytest.approx(2.5)
+
+
+def test_radecsys_rename(tmp_path, mock_config):
+    """Old RADECSYS header keyword is renamed to RADESYS so WCS builds cleanly."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from ztforce.image import ZTFImage
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [33, 33]
+    wcs.wcs.cdelt = [-0.000281, 0.000281]
+    wcs.wcs.crval = [150.0, 2.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    hdr = wcs.to_header()
+    hdr["MAGZP"] = 26.3
+    hdr["OBSJD"] = 2459000.0
+    hdr["GAIN"] = 6.2
+    hdr["MEDFWHM"] = 3.0
+    # Add old keyword to trigger rename path
+    hdr["RADECSYS"] = "ICRS"
+
+    path = tmp_path / "radecsys.fits"
+    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
+
+    img = ZTFImage(str(path), "g", mock_config)
+    # WCS should build without raising WCSError
+    wcs_built = img.wcs
+    assert wcs_built is not None
+
+
+def test_wcs_sky_to_pixel_round_trip(synthetic_fits_file, mock_config):
+    """sky_to_pixel and pixel_to_sky are inverses to within 0.01 px."""
+    from ztforce.image import ZTFImage
+
+    path, cx, cy = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+
+    coord = img.pixel_to_sky(float(cx), float(cy))
+    x2, y2 = img.sky_to_pixel(coord)
+    assert abs(x2 - cx) < 0.01
+    assert abs(y2 - cy) < 0.01
+
+
+def test_nan_mask(synthetic_fits_file, mock_config):
+    """nan_mask is True only where data is NaN."""
+    from ztforce.image import ZTFImage
+
+    path, cx, cy = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    # Synthetic image has no NaNs
+    assert not img.nan_mask.any()
+
+
+def test_background_subtracted_image(synthetic_fits_file, mock_config):
+    """image_sub has lower background level than raw data."""
+    from ztforce.image import ZTFImage
+
+    path, cx, cy = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    # Background-subtracted image should be closer to zero away from source
+    corner = img.image_sub[:20, :20]
+    assert abs(corner.mean()) < 20.0  # raw sky was ~200 ADU
+
+
+def test_psf_cutout_size_odd(synthetic_fits_file, mock_config):
+    """psf_cutout_size() always returns an odd integer."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    s = img.psf_cutout_size()
+    assert s % 2 == 1
+    assert s >= img.fwhm * mock_config.psf_cutout_fwhm_factor
+
+
+def test_lazy_properties_cached(synthetic_fits_file, mock_config):
+    """Accessing bkg and image_sub twice returns the same object."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    bkg1 = img.bkg
+    bkg2 = img.bkg
+    assert bkg1 is bkg2
+    sub1 = img.image_sub
+    sub2 = img.image_sub
+    assert sub1 is sub2

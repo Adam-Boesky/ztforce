@@ -59,7 +59,10 @@ testpaths = [
     "src",
     "docs",
 ]
-addopts = "--doctest-modules --doctest-glob=*.rst"
+addopts = "--doctest-modules --doctest-glob=*.rst -m 'not network'"
+markers = [
+    "network: marks tests that require network access (deselect with '-m \"not network\"')",
+]
 
 [tool.ruff]
 line-length = 110

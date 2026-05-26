@@ -106,10 +106,8 @@ def test_worker_kwargs_values_match_config(mock_config):
 
 def test_download_all_returns_sorted_triples(tmp_path, mock_config):
     """_download_all calls download functions and returns (row, fits_path, psf_path) sorted by obsjd."""
-    from ztforce.cache import make_cache
     from ztforce.pipeline import _download_all
 
-    cache = make_cache(tmp_path / "cache")
     fits_path = tmp_path / "img.fits"
     psf_fpath = tmp_path / "img.psf"
     _write_synthetic_fits(fits_path)
@@ -124,7 +122,7 @@ def test_download_all_returns_sorted_triples(tmp_path, mock_config):
         mock.patch("ztforce.pipeline.download_psf_sidecar", return_value=psf_fpath),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
     ):
-        results = _download_all(df, 150.0, 2.0, "g", cache, mock_config, n_workers=1)
+        results = _download_all(df, 150.0, 2.0, "g", tmp_path, mock_config, n_workers=1)
 
     assert len(results) == 2
     obsjds = [float(r[0]["obsjd"]) for r in results]
@@ -133,17 +131,15 @@ def test_download_all_returns_sorted_triples(tmp_path, mock_config):
 
 def test_download_all_skips_failed_downloads(tmp_path, mock_config):
     """_download_all silently drops images whose download raises."""
-    from ztforce.cache import make_cache
     from ztforce.pipeline import _download_all
 
-    cache = make_cache(tmp_path / "cache")
     df = _make_metadata_row()
 
     with (
         mock.patch("ztforce.pipeline.download_fits", side_effect=Exception("network error")),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
     ):
-        results = _download_all(df, 150.0, 2.0, "g", cache, mock_config, n_workers=1)
+        results = _download_all(df, 150.0, 2.0, "g", tmp_path, mock_config, n_workers=1)
 
     assert results == []
 

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
 from astropy.coordinates import SkyCoord
 
-from .cache import CacheConfig, lightcurve_path, make_cache
+from .cache import lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError
 from .image import ZTFImage
@@ -86,21 +87,17 @@ def _download_all(
     ra: float,
     dec: float,
     band: str,
-    cache: CacheConfig,
+    tmp_dir: Path,
     config: ZTForceConfig,
     n_workers: int,
 ) -> list[tuple[pd.Series, Path, Path]]:
-    """Download all FITS cutouts + PSF sidecars in parallel."""
-    from .cache import fits_path as _fits_path
-    from .cache import psf_path as _psf_path
+    """Download all FITS cutouts + PSF sidecars in parallel into tmp_dir."""
 
     def _download_one(row):
-        field = int(row["field"])
-        ccdid = int(row["ccdid"])
-        qid = int(row["qid"])
         obsjd = float(row["obsjd"])
-        local_fits = _fits_path(cache, field, ccdid, qid, band, obsjd)
-        local_psf = _psf_path(cache, field, ccdid, qid, band, obsjd)
+        stem = f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{obsjd:.3f}"
+        local_fits = tmp_dir / f"{stem}.fits"
+        local_psf = tmp_dir / f"{stem}.psf"
         fits_url = build_sci_url(
             row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin
         )
@@ -219,13 +216,14 @@ def run_forced_photometry(
         if max_epochs is not None:
             df = df.tail(max_epochs).reset_index(drop=True)
 
-        # Download phase (threaded)
-        image_triples = _download_all(df, ra, dec, band, cache, config, n_download_workers)
-        if not image_triples:
-            continue
+        # Download to a temp dir (cleaned up after photometry)
+        with tempfile.TemporaryDirectory() as _tmp:
+            image_triples = _download_all(df, ra, dec, band, Path(_tmp), config, n_download_workers)
+            if not image_triples:
+                continue
 
-        # PSF photometry phase (multiprocess)
-        results = _run_psf_parallel(image_triples, ra, dec, band, config, n_psf_workers)
+            # PSF photometry phase (multiprocess) — runs while temp files still exist
+            results = _run_psf_parallel(image_triples, ra, dec, band, config, n_psf_workers)
 
         # Assemble lightcurve
         lc = Lightcurve(ra=ra, dec=dec)

@@ -31,8 +31,8 @@ def test_data_is_native_endian(synthetic_fits_file, mock_config):
     path, _, _ = synthetic_fits_file
     img = ZTFImage(str(path), "g", mock_config)
     assert img.data.flags["C_CONTIGUOUS"]
-    # Native endian: dtype should not have '>' or '<' prefix
-    assert img.data.dtype.byteorder in ("=", "|", "=")
+    # Native endian: byte order must not be big- or little-endian (> or <)
+    assert img.data.dtype.byteorder not in (">", "<")
 
 
 def test_scalar_properties(synthetic_fits_file, mock_config):
@@ -186,3 +186,45 @@ def test_lazy_properties_cached(synthetic_fits_file, mock_config):
     sub1 = img.image_sub
     sub2 = img.image_sub
     assert sub1 is sub2
+
+
+def test_footprint_returns_ra_dec_bounds(synthetic_fits_file, mock_config):
+    """footprint() returns ((ra_min, ra_max), (dec_min, dec_max)) covering the image."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    (ra_min, ra_max), (dec_min, dec_max) = img.footprint()
+    assert ra_min < ra_max
+    assert dec_min < dec_max
+    # Synthetic image is centered near (150, 2), so bounds should straddle those coords
+    assert ra_min < 150.0 < ra_max
+    assert dec_min < 2.0 < dec_max
+
+
+def test_radecsys_both_keywords_deletes_duplicate(tmp_path, mock_config):
+    """When both RADECSYS and RADESYS are present, the duplicate RADECSYS is removed."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from ztforce.image import ZTFImage
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [33, 33]
+    wcs.wcs.cdelt = [-0.000281, 0.000281]
+    wcs.wcs.crval = [150.0, 2.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    hdr = wcs.to_header()
+    hdr["MAGZP"] = 26.3
+    hdr["OBSJD"] = 2459000.0
+    hdr["GAIN"] = 6.2
+    hdr["MEDFWHM"] = 3.0
+    # Both keywords present simultaneously — triggers the elif/del branch
+    hdr["RADESYS"] = "ICRS"
+    hdr["RADECSYS"] = "ICRS"
+
+    path = tmp_path / "both.fits"
+    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
+
+    img = ZTFImage(str(path), "g", mock_config)
+    assert "RADECSYS" not in img.header
+    assert img.wcs is not None

@@ -151,6 +151,44 @@ def test_poly_weights_n6():
     assert result == [1.0, dx, dy, dx * dx, dx * dy, dy * dy]
 
 
+def test_reconstruct_all_zero_raises(tmp_path):
+    """PSFBuildError is raised when reconstruction produces an all-zero stamp."""
+    from ztforce.exceptions import PSFBuildError
+    from ztforce.psf import parse_daophot_psf, reconstruct_psf
+
+    # Build a PSF where gauss + residuals will be entirely negative → clipped to zero
+    psf_size = 3
+    norm_factor = -1000.0  # negative norm → Gaussian is negative everywhere
+    header = f" GAUSSIAN  {psf_size:3d}    2    1    0   14.000  {norm_factor:12.3f}  1535.5  1539.5\n"
+    sigmas_line = "  1.500000E+00 1.500000E+00\n"
+    zeros = "  0.000000E+00 " * (psf_size * psf_size)
+
+    path = tmp_path / "allzero.psf"
+    path.write_text(header + sigmas_line + zeros + "\n")
+
+    parsed = parse_daophot_psf(path)
+    with pytest.raises(PSFBuildError, match="all-zero"):
+        reconstruct_psf(parsed, 1535.5, 1539.5)
+
+
+def test_poly_weights_generic_n4():
+    """_poly_weights for n=4 falls back to the first 4 degree-2 basis terms."""
+    from ztforce.psf import _poly_weights
+
+    dx, dy = 0.5, -0.3
+    result = _poly_weights(dx, dy, 4)
+    assert result == [1.0, dx, dy, dx * dx]
+
+
+def test_poly_weights_generic_n5():
+    """_poly_weights for n=5 falls back to the first 5 degree-2 basis terms."""
+    from ztforce.psf import _poly_weights
+
+    dx, dy = 0.5, -0.3
+    result = _poly_weights(dx, dy, 5)
+    assert result == [1.0, dx, dy, dx * dx, dx * dy]
+
+
 # ── forced_phot_at_position ───────────────────────────────────────────────────
 
 

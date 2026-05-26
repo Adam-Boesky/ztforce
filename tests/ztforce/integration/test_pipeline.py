@@ -110,6 +110,117 @@ def test_worker_kwargs_values_match_config(mock_config):
     assert kwargs["default_gain"] == mock_config.default_gain
 
 
+# ── _download_all ────────────────────────────────────────────────────────────
+
+
+def test_download_all_returns_sorted_triples(tmp_path, mock_config):
+    """_download_all calls download functions and returns (row, fits_path, psf_path) sorted by obsjd."""
+    from ztforce.cache import make_cache
+    from ztforce.pipeline import _download_all
+
+    cache = make_cache(tmp_path / "cache")
+    fits_path = tmp_path / "img.fits"
+    psf_fpath = tmp_path / "img.psf"
+    _write_synthetic_fits(fits_path)
+    _write_synthetic_psf(psf_fpath)
+
+    df = pd.concat(
+        [_make_metadata_row(obsjd=2459002.0), _make_metadata_row(obsjd=2459001.0)], ignore_index=True
+    )
+
+    with (
+        mock.patch("ztforce.pipeline.download_fits", return_value=fits_path),
+        mock.patch("ztforce.pipeline.download_psf_sidecar", return_value=psf_fpath),
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+    ):
+        results = _download_all(df, "g", cache, mock_config, n_workers=1)
+
+    assert len(results) == 2
+    obsjds = [float(r[0]["obsjd"]) for r in results]
+    assert obsjds == sorted(obsjds)
+
+
+def test_download_all_skips_failed_downloads(tmp_path, mock_config):
+    """_download_all silently drops images whose download raises."""
+    from ztforce.cache import make_cache
+    from ztforce.pipeline import _download_all
+
+    cache = make_cache(tmp_path / "cache")
+    df = _make_metadata_row()
+
+    with (
+        mock.patch("ztforce.pipeline.download_fits", side_effect=Exception("network error")),
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+    ):
+        results = _download_all(df, "g", cache, mock_config, n_workers=1)
+
+    assert results == []
+
+
+# ── _run_psf_parallel ─────────────────────────────────────────────────────────
+
+
+def test_run_psf_parallel_calls_worker(tmp_path, mock_config):
+    """_run_psf_parallel submits one job per image and returns results sorted by obsjd."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ztforce.pipeline import _run_psf_parallel
+    from ztforce.utils import flux_to_ab_mag
+
+    fits_path = tmp_path / "img.fits"
+    psf_fpath = tmp_path / "img.psf"
+    _write_synthetic_fits(fits_path)
+    _write_synthetic_psf(psf_fpath)
+
+    df = _make_metadata_row()
+    image_triples = [(df.iloc[0], fits_path, psf_fpath)]
+
+    mag, merr = flux_to_ab_mag(1000.0, 26.3, 50.0)
+    fake_result = dict(
+        flux=1000.0,
+        flux_err=50.0,
+        mag=mag,
+        mag_err=merr,
+        flags=0,
+        x_fit=32.0,
+        y_fit=32.0,
+        obsjd=2459000.0,
+        zero_point=26.3,
+        mag_limit=21.0,
+        image_id="test",
+        band="g",
+    )
+
+    # Replace ProcessPoolExecutor with ThreadPoolExecutor so mock survives pickling
+    with (
+        mock.patch("ztforce.pipeline.ProcessPoolExecutor", ThreadPoolExecutor),
+        mock.patch("ztforce.pipeline._process_one_image", return_value=fake_result),
+    ):
+        results = _run_psf_parallel(image_triples, 150.0, 2.0, "g", mock_config, n_workers=1)
+
+    assert len(results) == 1
+    assert results[0]["flux"] == pytest.approx(1000.0)
+
+
+# ── run_forced_photometry (empty downloads) ───────────────────────────────────
+
+
+def test_pipeline_empty_downloads_skips_band(tmp_path, mock_config):
+    """run_forced_photometry skips a band when all downloads fail."""
+    from ztforce.pipeline import run_forced_photometry
+
+    df = _make_metadata_row()
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata", return_value=df),
+        mock.patch("ztforce.pipeline._download_all", return_value=[]),
+    ):
+        result = run_forced_photometry(
+            150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config
+        )
+
+    assert result == {}
+
+
 # ── _process_one_image ────────────────────────────────────────────────────────
 
 

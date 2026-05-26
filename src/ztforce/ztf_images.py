@@ -17,9 +17,10 @@ from .cache import CacheConfig, fits_path, psf_path
 from .config import ZTForceConfig
 from .exceptions import FITSDownloadError, NoImagesFoundError
 
-_IRSA_BASE = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products/sci"
+_IRSA_BASE = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products"
 
 _BAND_TO_FILTERCODE = {"g": "zg", "r": "zr", "i": "zi"}
+_REQUIRED_METADATA_COLS = {"obsjd", "field", "ccdid", "qid", "filtercode", "filefracday"}
 
 
 def query_sci_metadata(
@@ -35,18 +36,38 @@ def query_sci_metadata(
     Raises NoImagesFoundError when no images are found.
     """
     filtercode = _BAND_TO_FILTERCODE[band]
-    zq = zquery.ZTFQuery()
-    zq.load_metadata(
-        kind="sci",
-        radec=(ra, dec),
-        size=search_radius_deg,
-        sql_query=f"filtercode='{filtercode}'",
-        auth=(config.irsa_user, config.irsa_pass),
+
+    last_exc: Exception | None = None
+    for attempt in range(config.max_retries):
+        try:
+            zq = zquery.ZTFQuery()
+            zq.load_metadata(
+                kind="sci",
+                radec=(ra, dec),
+                size=search_radius_deg,
+                sql_query=f"filtercode='{filtercode}'",
+                auth=(config.irsa_user, config.irsa_pass),
+            )
+            df = zq.metatable
+            if df is None or df.empty:
+                raise NoImagesFoundError(f"No ZTF {band}-band science images found at ({ra:.5f}, {dec:.5f}).")
+            if not _REQUIRED_METADATA_COLS.issubset(df.columns):
+                raise NoImagesFoundError(
+                    f"IRSA metadata query returned unexpected response "
+                    f"(columns: {list(df.columns)[:5]}). "
+                    f"The service may be temporarily unavailable."
+                )
+            return df.sort_values("obsjd").reset_index(drop=True)
+        except NoImagesFoundError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            delay = config.retry_base_delay * (2**attempt) + random.uniform(0, config.retry_jitter)
+            time.sleep(delay)
+    raise NoImagesFoundError(
+        f"IRSA metadata query failed after {config.max_retries} attempts "
+        f"for ZTF {band}-band at ({ra:.5f}, {dec:.5f}): {last_exc}"
     )
-    df = zq.metatable
-    if df is None or df.empty:
-        raise NoImagesFoundError(f"No ZTF {band}-band science images found at ({ra:.5f}, {dec:.5f}).")
-    return df.sort_values("obsjd").reset_index(drop=True)
 
 
 def build_sci_url(

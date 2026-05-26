@@ -16,10 +16,9 @@ from .utils import annular_background, has_nan_nearby
 def parse_daophot_psf(psf_fpath: str | Path) -> dict:
     """Parse a ZTF DAOPhot PSF sidecar file (sciimgdao.psf).
 
-    Returns a dict with keys:
-      psf_type, psf_size, n_tables, norm_factor, x_cen, y_cen, sigmas, tables
-
-    The PSF at pixel (x_target, y_target) is reconstructed via reconstruct_psf().
+    Returns a dict with keys ``psf_type``, ``psf_size``, ``n_tables``,
+    ``norm_factor``, ``x_cen``, ``y_cen``, ``sigmas``, ``tables``.
+    Pass the result to :func:`reconstruct_psf` to get a normalised PSF stamp.
     """
     with open(psf_fpath) as f:
         lines = f.readlines()
@@ -121,13 +120,12 @@ def forced_phot_at_position(
 ) -> dict:
     """Measure forced PSF photometry at a fixed sky position.
 
-    Position is fixed (not fitted). Only the amplitude is free, using the
-    optimal matched-filter estimator:
-      flux = sum(data * psf) / sum(psf^2)
-      flux_var = sum(noise^2 * psf^2) / sum(psf^2)^2
+    Only the amplitude is free; position is locked.  Uses the optimal
+    matched-filter estimator: ``flux = Σ(data·psf/σ²) / Σ(psf²/σ²)``.
 
-    Returns a dict with keys: flux, flux_err, mag, mag_err, flags, x_fit, y_fit.
-    flags=1 means the position was too close to image edge or a NaN region.
+    Returns a dict with keys ``flux``, ``flux_err``, ``mag``, ``mag_err``,
+    ``flags``, ``x_fit``, ``y_fit``.  ``flags=1`` means the position was too
+    close to the image edge or a NaN region.
     """
     from .utils import flux_to_ab_mag
 

@@ -173,9 +173,28 @@ def run_forced_photometry(
 ) -> dict[str, Lightcurve]:
     """Run forced PSF photometry at (ra, dec) for all requested bands.
 
-    Returns a dict mapping band → Lightcurve.
-    Lightcurves are loaded from cache when available; otherwise computed and saved.
+    Downloads ZTF science image cutouts from IRSA, fits the source amplitude at the
+    fixed sky position using the per-image DAOPhot PSF sidecar, and returns calibrated
+    AB-magnitude lightcurves.  Results are cached on disk; repeated calls for the same
+    position return immediately without any network access.
 
+    Args:
+        ra: Right ascension in decimal degrees (J2000).
+        dec: Declination in decimal degrees (J2000).
+        bands: ZTF bands to process.  Any subset of ``("g", "r", "i")``.
+        data_dir: Root directory for the on-disk cache.  Defaults to
+            ``~/.ztforce/cache`` when ``None``.
+        config: Credentials and runtime settings.  Built from environment
+            variables / ``~/.ztforce/config.toml`` when ``None``.
+        n_download_workers: Number of parallel threads for FITS downloads.
+        n_psf_workers: Number of parallel processes for PSF photometry.
+        max_epochs: If set, process only the *most recent* ``max_epochs``
+            exposures per band.  Useful for quick tests.
+
+    Returns:
+        Dict mapping band label (``"g"``, ``"r"``, ``"i"``) to a
+        :class:`~ztforce.Lightcurve`.  Bands with no available images are
+        omitted.
     """
     cache = make_cache(data_dir)
     if config is None:

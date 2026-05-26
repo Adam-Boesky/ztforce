@@ -45,30 +45,6 @@ def test_toml_file_third_priority(monkeypatch, tmp_path):
     assert cfg.irsa_pass == "tomlpass"
 
 
-def test_vault_file_fallback(monkeypatch, tmp_path):
-    """Legacy ~/vault/irsa_login.txt is read as last resort."""
-    _clean_env(monkeypatch)
-
-    vault_dir = tmp_path / "vault"
-    vault_dir.mkdir()
-    vault_file = vault_dir / "irsa_login.txt"
-    vault_file.write_text("vaultuser\nvaultpass\n")
-
-    # Patch the path constant in config module
-    import ztforce.config as cfg_mod
-
-    original = cfg_mod._VAULT_IRSA
-    cfg_mod._VAULT_IRSA = vault_file
-    try:
-        from ztforce.config import build_config
-
-        cfg = build_config(config_path=tmp_path / "x.toml")
-        assert cfg.irsa_user == "vaultuser"
-        assert cfg.irsa_pass == "vaultpass"
-    finally:
-        cfg_mod._VAULT_IRSA = original
-
-
 def test_config_error_when_no_source(monkeypatch, tmp_path):
     """ConfigError is raised when no credential source provides both values."""
     _clean_env(monkeypatch)

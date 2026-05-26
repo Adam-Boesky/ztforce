@@ -16,9 +16,6 @@ _ENV_IRSA_PASS = "ZTFORCE_IRSA_PASS"
 # Default config file location
 _DEFAULT_CONFIG_PATH = Path.home() / ".ztforce" / "config.toml"
 
-# Legacy vault files
-_VAULT_IRSA = Path.home() / "vault" / "irsa_login.txt"
-
 
 @dataclass
 class ZTForceConfig:
@@ -73,35 +70,29 @@ def build_config(
     1. Direct parameters passed here
     2. Environment variables ZTFORCE_IRSA_USER / ZTFORCE_IRSA_PASS
     3. ~/.ztforce/config.toml  [credentials] section
-    4. Legacy ~/vault/irsa_login.txt (first line = user, second = pass)
 
     Raises ConfigError listing all sources tried if credentials are not found.
     """
     cfg_path = Path(config_path) if config_path else _DEFAULT_CONFIG_PATH
     toml_data = _load_toml(cfg_path)
 
-    def resolve(key_direct, env_var, toml_key, vault_path, vault_idx):
+    def resolve(key_direct, env_var, toml_key):
         if key_direct:
             return key_direct
         if env_val := os.environ.get(env_var):
             return env_val
         if toml_val := toml_data.get("credentials", {}).get(toml_key):
             return toml_val
-        if vault_path.exists():
-            lines = vault_path.read_text().splitlines()
-            if vault_idx < len(lines) and lines[vault_idx].strip():
-                return lines[vault_idx].strip()
         return None
 
-    resolved_user = resolve(irsa_user, _ENV_IRSA_USER, "irsa_user", _VAULT_IRSA, 0)
-    resolved_pass = resolve(irsa_pass, _ENV_IRSA_PASS, "irsa_pass", _VAULT_IRSA, 1)
+    resolved_user = resolve(irsa_user, _ENV_IRSA_USER, "irsa_user")
+    resolved_pass = resolve(irsa_pass, _ENV_IRSA_PASS, "irsa_pass")
 
     if not resolved_user or not resolved_pass:
         tried = [
             "  direct parameters (irsa_user/irsa_pass)",
             f"  env vars: {_ENV_IRSA_USER}, {_ENV_IRSA_PASS}",
             f"  config file: {cfg_path}  ([credentials] irsa_user/irsa_pass)",
-            f"  legacy vault: {_VAULT_IRSA}  (line 0 = user, line 1 = pass)",
         ]
         raise ConfigError("IRSA credentials not found. Tried:\n" + "\n".join(tried))
 

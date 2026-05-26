@@ -13,6 +13,10 @@ from .exceptions import (
 from .lightcurve import Lightcurve
 from .pipeline import run_forced_photometry, run_forced_photometry_batch
 
+# Bump when the photometry algorithm changes in a way that makes existing
+# cached lightcurves stale (e.g. new background estimator, PSF fitting change).
+_PHOTOMETRY_VERSION = "1"
+
 __all__ = [
     "__version__",
     "ZTForceConfig",

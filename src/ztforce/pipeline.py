@@ -11,7 +11,8 @@ from pathlib import Path
 import pandas as pd
 from astropy.coordinates import SkyCoord
 
-from .cache import _PHOTOMETRY_VERSION, lightcurve_path, make_cache
+from . import _PHOTOMETRY_VERSION
+from .cache import lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError
 from .image import ZTFImage

@@ -5,11 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-# Bump this when the photometry algorithm changes in a way that makes old
-# cached lightcurves stale (e.g. new background estimator, PSF fitting change).
-# Incrementing causes all existing caches to be silently recomputed on next use.
-_PHOTOMETRY_VERSION = "1"
-
 
 @dataclass
 class CacheConfig:

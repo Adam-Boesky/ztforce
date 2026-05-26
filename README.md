@@ -18,13 +18,6 @@ pip install ztforce
 
 **Python 3.10–3.13** is supported.
 
-> **Apple Silicon (M1/M2/M3) note:** the `sep` dependency may need to be installed
-> via conda before `pip install ztforce`:
-> ```bash
-> conda install -c conda-forge sep
-> pip install ztforce
-> ```
-
 ### Credentials
 
 ztforce downloads ZTF science images from IRSA and requires an IRSA account

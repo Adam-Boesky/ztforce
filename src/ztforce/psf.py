@@ -10,7 +10,7 @@ from astropy.coordinates import SkyCoord
 
 from .exceptions import PSFBuildError, WCSError
 from .image import ZTFImage
-from .utils import has_nan_nearby
+from .utils import annular_background, has_nan_nearby
 
 
 def parse_daophot_psf(psf_fpath: str | Path) -> dict:
@@ -151,7 +151,7 @@ def forced_phot_at_position(
     xi, yi = int(round(x0)), int(round(y0))
     psf_size = parsed_psf["psf_size"]
     half = psf_size // 2
-    ny, nx = image.image_sub.shape
+    ny, nx = image.data.shape
 
     # Reject if too close to edge
     if xi - half < 0 or xi + half + 1 > nx or yi - half < 0 or yi + half + 1 > ny:
@@ -161,16 +161,20 @@ def forced_phot_at_position(
     if has_nan_nearby(yi, xi, half, image.nan_mask):
         return nan_result
 
-    # Extract image cutout
-    cutout = image.image_sub[yi - half : yi + half + 1, xi - half : xi + half + 1].copy()
+    # Extract raw cutout; estimate and subtract local sky from an annulus
+    raw_cutout = image.data[yi - half : yi + half + 1, xi - half : xi + half + 1].copy()
+    sky_level, sky_rms = annular_background(
+        raw_cutout, float(half), float(half), 2.0 * image.fwhm, 4.0 * image.fwhm
+    )
+    cutout = raw_cutout - sky_level
 
     # PSF model uses full-quadrant coordinates for the spatially-varying polynomial
     psf_stamp = reconstruct_psf(parsed_psf, x0_full, y0_full)
 
-    # Noise model: sqrt(|sky| / gain + bkg.rms^2)
-    bkg_rms = image.bkg.rms()[yi - half : yi + half + 1, xi - half : xi + half + 1]
-    noise_var = bkg_rms**2 + np.abs(cutout) / image.gain
-    noise_var = np.where(noise_var > 0, noise_var, bkg_rms.mean() ** 2)
+    # Noise model: Poisson + sky background variance
+    fallback_var = max(sky_rms**2, 1.0)
+    noise_var = sky_rms**2 + np.abs(cutout) / image.gain
+    noise_var = np.where(noise_var > 0, noise_var, fallback_var)
 
     # Matched-filter flux estimator (optimal for Gaussian noise)
     w = psf_stamp / noise_var

@@ -113,6 +113,52 @@ def test_has_nan_nearby_boundary():
 # ── nearest_odd_int ───────────────────────────────────────────────────────────
 
 
+# ── annular_background ────────────────────────────────────────────────────────
+
+
+def test_annular_background_flat_sky():
+    """Returns the correct sky level on a perfectly flat background."""
+    from ztforce.utils import annular_background
+
+    data = np.full((50, 50), 100.0)
+    level, rms = annular_background(data, 25.0, 25.0, r_inner=5.0, r_outer=15.0)
+    assert abs(level - 100.0) < 1e-6
+    assert rms < 1e-6
+
+
+def test_annular_background_clips_outliers():
+    """Sigma clipping removes bright outliers from the sky estimate."""
+    from ztforce.utils import annular_background
+
+    rng = np.random.default_rng(42)
+    data = rng.normal(50.0, 2.0, (60, 60))
+    # Plant a bright spike at a known annulus position
+    data[30, 40] = 1000.0
+    level, _ = annular_background(data, 30.0, 30.0, r_inner=5.0, r_outer=15.0)
+    assert abs(level - 50.0) < 1.0
+
+
+def test_annular_background_excludes_source_core():
+    """Sky level is unbiased even with a bright source inside r_inner."""
+    from ztforce.utils import annular_background
+
+    data = np.full((60, 60), 30.0)
+    # Bright point source at center
+    data[30, 30] = 50000.0
+    level, _ = annular_background(data, 30.0, 30.0, r_inner=5.0, r_outer=15.0)
+    assert abs(level - 30.0) < 1.0
+
+
+def test_annular_background_fallback_on_sparse_annulus():
+    """Falls back gracefully when fewer than 5 pixels are in the annulus."""
+    from ztforce.utils import annular_background
+
+    data = np.full((10, 10), 20.0)
+    # Tiny image so inner/outer radii leave very few pixels
+    level, _ = annular_background(data, 5.0, 5.0, r_inner=1.0, r_outer=1.5)
+    assert np.isfinite(level)
+
+
 @pytest.mark.parametrize(
     "x,expected",
     [

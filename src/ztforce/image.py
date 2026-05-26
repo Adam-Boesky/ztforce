@@ -1,22 +1,16 @@
-"""ZTFImage: FITS loading, SEP background, source extraction, WCS."""
+"""ZTFImage: FITS loading, WCS, and pixel/sky coordinate transforms."""
 
 from __future__ import annotations
 
 import warnings
 
 import numpy as np
-import sep
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 
 from .config import ZTForceConfig
 from .exceptions import WCSError
-from .utils import nearest_odd_int
-
-# SEP tuning — must be set at module load before any extraction call
-sep.set_extract_pixstack(1_000_000)
-sep.set_sub_object_limit(4096)
 
 
 class ZTFImage:
@@ -26,12 +20,9 @@ class ZTFImage:
         self._fpath = fits_fpath
         self.band = band
         self._config = config
-        self._hdul: fits.HDUList | None = None
-        self._data: np.ndarray | None = None
         self._header: fits.Header | None = None
+        self._data: np.ndarray | None = None
         self._wcs: WCS | None = None
-        self._bkg: sep.Background | None = None
-        self._image_sub: np.ndarray | None = None
         self._nan_mask: np.ndarray | None = None
 
     # ── raw data ─────────────────────────────────────────────────────────────
@@ -84,7 +75,6 @@ class ZTFImage:
         if "GAIN" in hdr:
             return float(hdr["GAIN"])
         if "NFRAMES" in hdr:
-            # Deep-stack convention from ZTF pipeline paper
             return 5.8 * float(hdr["NFRAMES"])
         return self._config.default_gain
 
@@ -160,7 +150,7 @@ class ZTFImage:
         decs = [c.dec.deg for c in corners]
         return (min(ras), max(ras)), (min(decs), max(decs))
 
-    # ── SEP background & extraction ───────────────────────────────────────────
+    # ── masks ─────────────────────────────────────────────────────────────────
 
     @property
     def nan_mask(self) -> np.ndarray:
@@ -168,31 +158,3 @@ class ZTFImage:
         if self._nan_mask is None:
             self._nan_mask = ~np.isfinite(self.data)
         return self._nan_mask
-
-    @property
-    def bkg(self) -> sep.Background:
-        """SEP background model (lazy, cached)."""
-        if self._bkg is None:
-            cfg = self._config
-            self._bkg = sep.Background(
-                self.data,
-                bw=cfg.sep_bw,
-                bh=cfg.sep_bh,
-                fw=cfg.sep_fw,
-                fh=cfg.sep_fh,
-                mask=self.nan_mask,
-            )
-        return self._bkg
-
-    @property
-    def image_sub(self) -> np.ndarray:
-        """Background-subtracted image array."""
-        if self._image_sub is None:
-            self._image_sub = self.data - self.bkg.back()
-        return self._image_sub
-
-    # ── PSF sizing ────────────────────────────────────────────────────────────
-
-    def psf_cutout_size(self) -> int:
-        """Odd integer cutout size for PSF extraction: nearest_odd_int(FWHM * factor)."""
-        return nearest_odd_int(self.fwhm * self._config.psf_cutout_fwhm_factor)

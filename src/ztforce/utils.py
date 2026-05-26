@@ -67,3 +67,44 @@ def nearest_odd_int(x: float) -> int:
     """Round *x* up to the nearest odd integer."""
     n = int(np.ceil(x))
     return n if n % 2 == 1 else n + 1
+
+
+def annular_background(
+    data: np.ndarray,
+    cx: float,
+    cy: float,
+    r_inner: float,
+    r_outer: float,
+    sigma: float = 3.0,
+) -> tuple[float, float]:
+    """Sigma-clipped sky level and RMS in an annulus around (cx, cy).
+
+    cx/cy follow the FITS/numpy column/row convention (cx = column index).
+    Returns (sky_level, sky_rms).  Falls back to the global finite-pixel
+    statistics when fewer than 5 annulus pixels are available.
+    """
+    ny, nx = data.shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    annulus = (r2 >= r_inner**2) & (r2 <= r_outer**2) & np.isfinite(data)
+    pixels = data[annulus]
+
+    if len(pixels) < 5:
+        finite = data[np.isfinite(data)]
+        if len(finite) == 0:
+            return 0.0, 0.0
+        return float(np.median(finite)), float(np.std(finite))
+
+    med = float(np.median(pixels))
+    std = float(np.std(pixels))
+    for _ in range(3):
+        if std == 0:
+            break
+        keep = np.abs(pixels - med) < sigma * std
+        if not keep.any():
+            break
+        pixels = pixels[keep]
+        med = float(np.median(pixels))
+        std = float(np.std(pixels))
+
+    return med, std

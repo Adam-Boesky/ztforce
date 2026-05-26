@@ -152,42 +152,6 @@ def test_nan_mask(synthetic_fits_file, mock_config):
     assert not img.nan_mask.any()
 
 
-def test_background_subtracted_image(synthetic_fits_file, mock_config):
-    """image_sub has lower background level than raw data."""
-    from ztforce.image import ZTFImage
-
-    path, cx, cy = synthetic_fits_file
-    img = ZTFImage(str(path), "g", mock_config)
-    # Background-subtracted image should be closer to zero away from source
-    corner = img.image_sub[:20, :20]
-    assert abs(corner.mean()) < 20.0  # raw sky was ~200 ADU
-
-
-def test_psf_cutout_size_odd(synthetic_fits_file, mock_config):
-    """psf_cutout_size() always returns an odd integer."""
-    from ztforce.image import ZTFImage
-
-    path, _, _ = synthetic_fits_file
-    img = ZTFImage(str(path), "g", mock_config)
-    s = img.psf_cutout_size()
-    assert s % 2 == 1
-    assert s >= img.fwhm * mock_config.psf_cutout_fwhm_factor
-
-
-def test_lazy_properties_cached(synthetic_fits_file, mock_config):
-    """Accessing bkg and image_sub twice returns the same object."""
-    from ztforce.image import ZTFImage
-
-    path, _, _ = synthetic_fits_file
-    img = ZTFImage(str(path), "g", mock_config)
-    bkg1 = img.bkg
-    bkg2 = img.bkg
-    assert bkg1 is bkg2
-    sub1 = img.image_sub
-    sub2 = img.image_sub
-    assert sub1 is sub2
-
-
 def test_footprint_returns_ra_dec_bounds(synthetic_fits_file, mock_config):
     """footprint() returns ((ra_min, ra_max), (dec_min, dec_max)) covering the image."""
     from ztforce.image import ZTFImage

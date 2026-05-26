@@ -66,7 +66,7 @@ def test_default_photometry_params(monkeypatch, tmp_path):
 
     cfg = build_config(config_path=tmp_path / "x.toml")
     defaults = ZTForceConfig(irsa_user="u", irsa_pass="p")
-    assert cfg.sep_bw == defaults.sep_bw
+    assert cfg.cutout_size_arcmin == defaults.cutout_size_arcmin
     assert cfg.max_retries == defaults.max_retries
     assert cfg.default_gain == defaults.default_gain
 

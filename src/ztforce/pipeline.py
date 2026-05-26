@@ -28,11 +28,6 @@ def _process_one_image(
     image_id: str,
     irsa_user: str,
     irsa_pass: str,
-    sep_bw: int,
-    sep_bh: int,
-    sep_fw: int,
-    sep_fh: int,
-    psf_cutout_fwhm_factor: float,
     default_gain: float,
 ) -> dict:
     """Run forced PSF photometry for one image. Returns a result dict."""
@@ -41,11 +36,6 @@ def _process_one_image(
     config = ZTForceConfig(
         irsa_user=irsa_user,
         irsa_pass=irsa_pass,
-        sep_bw=sep_bw,
-        sep_bh=sep_bh,
-        sep_fw=sep_fw,
-        sep_fh=sep_fh,
-        psf_cutout_fwhm_factor=psf_cutout_fwhm_factor,
         default_gain=default_gain,
     )
     try:
@@ -84,11 +74,6 @@ def _worker_kwargs(config: ZTForceConfig) -> dict:
     return dict(
         irsa_user=config.irsa_user,
         irsa_pass=config.irsa_pass,
-        sep_bw=config.sep_bw,
-        sep_bh=config.sep_bh,
-        sep_fw=config.sep_fw,
-        sep_fh=config.sep_fh,
-        psf_cutout_fwhm_factor=config.psf_cutout_fwhm_factor,
         default_gain=config.default_gain,
     )
 

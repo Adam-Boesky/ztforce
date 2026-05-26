@@ -25,17 +25,8 @@ class ZTForceConfig:
     irsa_user: str = ""
     irsa_pass: str = ""
 
-    # SEP background / extraction
-    sep_bw: int = 64
-    sep_bh: int = 64
-    sep_fw: int = 3
-    sep_fh: int = 3
-
-    # PSF sizing (cutout = nearest_odd_int(FWHM * factor))
-    psf_cutout_fwhm_factor: float = 14.0
-
     # IRSA IBE cutout size for science image downloads
-    cutout_size_arcmin: float = 15.0
+    cutout_size_arcmin: float = 2.0
 
     # Retry / download
     max_retries: int = 3

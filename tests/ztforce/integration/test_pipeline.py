@@ -88,16 +88,7 @@ def test_worker_kwargs_contains_all_fields(mock_config):
     from ztforce.pipeline import _worker_kwargs
 
     kwargs = _worker_kwargs(mock_config)
-    for key in (
-        "irsa_user",
-        "irsa_pass",
-        "sep_bw",
-        "sep_bh",
-        "sep_fw",
-        "sep_fh",
-        "psf_cutout_fwhm_factor",
-        "default_gain",
-    ):
+    for key in ("irsa_user", "irsa_pass", "default_gain"):
         assert key in kwargs
 
 

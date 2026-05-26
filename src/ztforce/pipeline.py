@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -9,13 +11,28 @@ from pathlib import Path
 import pandas as pd
 from astropy.coordinates import SkyCoord
 
-from .cache import lightcurve_path, make_cache
+from .cache import _PHOTOMETRY_VERSION, lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError
 from .image import ZTFImage
 from .lightcurve import Lightcurve
 from .psf import forced_phot_at_position, parse_daophot_psf
 from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata
+
+# ── Cache key ────────────────────────────────────────────────────────────────
+
+
+def _cache_key(config: ZTForceConfig, max_epochs: int | None) -> str:
+    """12-hex-char hash of the parameters that affect photometry output."""
+    params = {
+        "photometry_version": _PHOTOMETRY_VERSION,
+        "cutout_size_arcmin": config.cutout_size_arcmin,
+        "default_gain": config.default_gain,
+        "max_epochs": max_epochs,
+    }
+    blob = json.dumps(params, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
 
 # ── Worker (must be importable at module level for ProcessPoolExecutor on macOS) ──
 
@@ -200,15 +217,19 @@ def run_forced_photometry(
     if config is None:
         config = build_config()
 
+    ck = _cache_key(config, max_epochs)
     lightcurves: dict[str, Lightcurve] = {}
 
     for band in bands:
         lc_fpath = lightcurve_path(cache, ra, dec, band)
 
-        # Cache hit: skip download + photometry entirely
+        # Cache hit: load and return if the key matches
         if lc_fpath.exists() and not force_recompute:
-            lightcurves[band] = Lightcurve.load(lc_fpath)
-            continue
+            lc = Lightcurve.load(lc_fpath)
+            if lc.cache_key == ck:
+                lightcurves[band] = lc
+                continue
+            # stale cache (settings changed) — fall through and recompute
 
         # Query metadata
         try:
@@ -248,6 +269,7 @@ def run_forced_photometry(
                 image_id=res.get("image_id"),
             )
 
+        lc.cache_key = ck
         lc.save(lc_fpath)
         lightcurves[band] = lc
 

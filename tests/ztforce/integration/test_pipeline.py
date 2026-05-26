@@ -249,15 +249,15 @@ def test_cache_hit_skips_all_computation(tmp_path, mock_config):
     """run_forced_photometry loads from cache and never calls query_sci_metadata."""
     from ztforce.cache import lightcurve_path, make_cache
     from ztforce.lightcurve import Lightcurve
-    from ztforce.pipeline import run_forced_photometry
+    from ztforce.pipeline import _cache_key, run_forced_photometry
     from ztforce.utils import flux_to_ab_mag
 
     cache = make_cache(tmp_path / "cache")
     lc_path = lightcurve_path(cache, 150.0, 2.0, "g")
     lc_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pre-populate a cached lightcurve
     lc_pre = Lightcurve(ra=150.0, dec=2.0)
+    lc_pre.cache_key = _cache_key(mock_config, None)
     mag, merr = flux_to_ab_mag(1000.0, 26.3, 50.0)
     lc_pre.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, 26.3, 0)
     lc_pre.save(lc_path)
@@ -276,7 +276,7 @@ def test_cache_hit_returns_correct_lightcurve(tmp_path, mock_config):
     """The cached lightcurve has the correct ra/dec metadata after reload."""
     from ztforce.cache import lightcurve_path, make_cache
     from ztforce.lightcurve import Lightcurve
-    from ztforce.pipeline import run_forced_photometry
+    from ztforce.pipeline import _cache_key, run_forced_photometry
     from ztforce.utils import flux_to_ab_mag
 
     cache = make_cache(tmp_path / "cache")
@@ -284,6 +284,7 @@ def test_cache_hit_returns_correct_lightcurve(tmp_path, mock_config):
     lc_path.parent.mkdir(parents=True, exist_ok=True)
 
     lc_pre = Lightcurve(ra=150.0, dec=2.0)
+    lc_pre.cache_key = _cache_key(mock_config, None)
     mag, merr = flux_to_ab_mag(500.0, 26.3, 25.0)
     lc_pre.add_epoch(2459000.0, "g", 500.0, 25.0, mag, merr, 26.3, 0)
     lc_pre.save(lc_path)
@@ -294,6 +295,31 @@ def test_cache_hit_returns_correct_lightcurve(tmp_path, mock_config):
 
 
 # ── run_forced_photometry (no images) ─────────────────────────────────────────
+
+
+def test_cache_hit_stale_key_triggers_recompute(tmp_path, mock_config):
+    """A cached lightcurve with a mismatched cache_key is recomputed, not returned."""
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.exceptions import NoImagesFoundError
+    from ztforce.lightcurve import Lightcurve
+    from ztforce.pipeline import run_forced_photometry
+    from ztforce.utils import flux_to_ab_mag
+
+    cache = make_cache(tmp_path / "cache")
+    lc_path = lightcurve_path(cache, 150.0, 2.0, "g")
+    lc_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lc_pre = Lightcurve(ra=150.0, dec=2.0)
+    lc_pre.cache_key = "stale_key_000"  # won't match current config hash
+    mag, merr = flux_to_ab_mag(1000.0, 26.3, 50.0)
+    lc_pre.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, 26.3, 0)
+    lc_pre.save(lc_path)
+
+    with mock.patch("ztforce.pipeline.query_sci_metadata") as mock_query:
+        mock_query.side_effect = NoImagesFoundError("none")
+        run_forced_photometry(150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config)
+
+    mock_query.assert_called_once()
 
 
 def test_force_recompute_ignores_cache(tmp_path, mock_config):

@@ -23,6 +23,7 @@ class Lightcurve:
         self.ra = ra
         self.dec = dec
         self._rows: list[dict] = []
+        self.cache_key: str = ""
 
     # ── I/O ──────────────────────────────────────────────────────────────────
 
@@ -232,6 +233,7 @@ class Lightcurve:
         t = Table.from_pandas(self.df)
         t.meta["ra"] = self.ra
         t.meta["dec"] = self.dec
+        t.meta["cache_key"] = self.cache_key
         t.write(str(path), format="ascii.ecsv", overwrite=True)
 
     @classmethod
@@ -239,6 +241,7 @@ class Lightcurve:
         """Load from an Astropy ECSV file saved by save()."""
         t = Table.read(str(path), format="ascii.ecsv")
         lc = cls(ra=float(t.meta["ra"]), dec=float(t.meta["dec"]))
+        lc.cache_key = t.meta.get("cache_key", "")
         df = t.to_pandas()
         for _, row in df.iterrows():
             lc._rows.append(row.to_dict())

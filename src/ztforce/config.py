@@ -34,6 +34,9 @@ class ZTForceConfig:
     # PSF sizing (cutout = nearest_odd_int(FWHM * factor))
     psf_cutout_fwhm_factor: float = 14.0
 
+    # IRSA IBE cutout size for science image downloads
+    cutout_size_arcmin: float = 15.0
+
     # Retry / download
     max_retries: int = 3
     retry_base_delay: float = 1.0

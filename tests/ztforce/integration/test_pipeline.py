@@ -133,7 +133,7 @@ def test_download_all_returns_sorted_triples(tmp_path, mock_config):
         mock.patch("ztforce.pipeline.download_psf_sidecar", return_value=psf_fpath),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
     ):
-        results = _download_all(df, "g", cache, mock_config, n_workers=1)
+        results = _download_all(df, 150.0, 2.0, "g", cache, mock_config, n_workers=1)
 
     assert len(results) == 2
     obsjds = [float(r[0]["obsjd"]) for r in results]
@@ -152,7 +152,7 @@ def test_download_all_skips_failed_downloads(tmp_path, mock_config):
         mock.patch("ztforce.pipeline.download_fits", side_effect=Exception("network error")),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
     ):
-        results = _download_all(df, "g", cache, mock_config, n_workers=1)
+        results = _download_all(df, 150.0, 2.0, "g", cache, mock_config, n_workers=1)
 
     assert results == []
 

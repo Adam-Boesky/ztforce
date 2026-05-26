@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -50,15 +49,27 @@ def query_sci_metadata(
     return df.sort_values("obsjd").reset_index(drop=True)
 
 
-def build_sci_url(row: pd.Series, suffix: str = "sciimg.fits") -> str:
-    """Construct the IRSA IBE URL for a science image product."""
+def build_sci_url(
+    row: pd.Series,
+    ra: float,
+    dec: float,
+    suffix: str = "sciimg.fits",
+    cutout_size_arcmin: float = 15.0,
+) -> str:
+    """Construct the IRSA IBE URL for a science image product.
+
+    For FITS files a cutout query is appended so that only a
+    ``cutout_size_arcmin`` × ``cutout_size_arcmin`` region centred on
+    ``(ra, dec)`` is downloaded.  PSF sidecar files are returned in full
+    (they are small text files that describe the whole quadrant).
+    """
     ff = str(int(row["filefracday"]))
     year, month, day, fracday = ff[:4], ff[4:6], ff[6:8], ff[8:]
     paddedfield = str(int(row["field"])).zfill(6)
     filtercode = row["filtercode"]
     paddedccdid = str(int(row["ccdid"])).zfill(2)
     qid = str(int(row["qid"]))
-    return buildurl.science_path(
+    base = buildurl.science_path(
         year=year,
         month=month,
         day=day,
@@ -70,6 +81,10 @@ def build_sci_url(row: pd.Series, suffix: str = "sciimg.fits") -> str:
         suffix=suffix,
         source=_IRSA_BASE,
     )
+    if suffix.endswith(".fits"):
+        size_arcsec = cutout_size_arcmin * 60.0
+        return f"{base}?center={ra},{dec}&size={size_arcsec}arcsec"
+    return base
 
 
 def _validate_fits(path: Path) -> bool:
@@ -78,11 +93,6 @@ def _validate_fits(path: Path) -> bool:
         with fits.open(str(path), checksum=True) as hdul:
             _ = hdul[0].data
         return True
-    except Exception:
-        pass
-    try:
-        result = subprocess.run(["fitscheck", str(path)], capture_output=True, timeout=30)
-        return result.returncode == 0
     except Exception:
         return False
 
@@ -115,7 +125,7 @@ def _download_with_retry(
 
 
 def download_fits(url: str, dest: Path, config: ZTForceConfig) -> Path:
-    """Download a FITS file, checking the cache first."""
+    """Download a FITS cutout, checking the cache first."""
     if dest.exists() and _validate_fits(dest):
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +149,8 @@ def iter_sci_images(
 ) -> Iterator[tuple[pd.Series, Path, Path]]:
     """Yield (metadata_row, fits_path, psf_sidecar_path) for every available epoch.
 
-    Files are downloaded only when not already cached. Yields lazily.
+    FITS files are downloaded as cutouts centred on (ra, dec).
+    Files are skipped on download failure.
     """
     df = query_sci_metadata(ra, dec, band, config)
     for _, row in df.iterrows():
@@ -151,8 +162,10 @@ def iter_sci_images(
         local_fits = fits_path(cache, field, ccdid, qid, band, obsjd)
         local_psf = psf_path(cache, field, ccdid, qid, band, obsjd)
 
-        fits_url = build_sci_url(row, suffix="sciimg.fits")
-        psf_url = build_sci_url(row, suffix="sciimgdao.psf")
+        fits_url = build_sci_url(
+            row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin
+        )
+        psf_url = build_sci_url(row, ra, dec, suffix="sciimgdao.psf")
 
         try:
             download_fits(fits_url, local_fits, config)

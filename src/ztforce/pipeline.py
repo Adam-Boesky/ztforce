@@ -98,12 +98,14 @@ def _worker_kwargs(config: ZTForceConfig) -> dict:
 
 def _download_all(
     df: pd.DataFrame,
+    ra: float,
+    dec: float,
     band: str,
     cache: CacheConfig,
     config: ZTForceConfig,
     n_workers: int,
 ) -> list[tuple[pd.Series, Path, Path]]:
-    """Download all FITS + PSF files in parallel. Returns list of (row, fits_path, psf_path)."""
+    """Download all FITS cutouts + PSF sidecars in parallel."""
     from .cache import fits_path as _fits_path
     from .cache import psf_path as _psf_path
 
@@ -114,8 +116,10 @@ def _download_all(
         obsjd = float(row["obsjd"])
         local_fits = _fits_path(cache, field, ccdid, qid, band, obsjd)
         local_psf = _psf_path(cache, field, ccdid, qid, band, obsjd)
-        fits_url = build_sci_url(row, suffix="sciimg.fits")
-        psf_url = build_sci_url(row, suffix="sciimgdao.psf")
+        fits_url = build_sci_url(
+            row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin
+        )
+        psf_url = build_sci_url(row, ra, dec, suffix="sciimgdao.psf")
         try:
             download_fits(fits_url, local_fits, config)
             download_psf_sidecar(psf_url, local_psf, config)
@@ -207,7 +211,7 @@ def run_forced_photometry(
             continue
 
         # Download phase (threaded)
-        image_triples = _download_all(df, band, cache, config, n_download_workers)
+        image_triples = _download_all(df, ra, dec, band, cache, config, n_download_workers)
         if not image_triples:
             continue
 

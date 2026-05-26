@@ -202,6 +202,77 @@ def test_footprint_returns_ra_dec_bounds(synthetic_fits_file, mock_config):
     assert dec_min < 2.0 < dec_max
 
 
+def test_cutout_origin_defaults_to_zero(synthetic_fits_file, mock_config):
+    """cutout_origin is (0, 0) when LTV keywords are absent (full-image download)."""
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.cutout_origin == (0.0, 0.0)
+
+
+def test_cutout_origin_from_ltv_keywords(tmp_path, mock_config):
+    """cutout_origin reflects LTV1/LTV2 using the IRAF negative-offset convention."""
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+
+    hdr = fits.Header()
+    hdr["MAGZP"] = 26.3
+    hdr["OBSJD"] = 2459000.0
+    hdr["GAIN"] = 6.2
+    hdr["MEDFWHM"] = 3.0
+    hdr["RADESYS"] = "ICRS"
+    # IRSA convention: LTV = -(0-indexed start), so origin = -LTV
+    hdr["LTV1"] = -512.0
+    hdr["LTV2"] = -256.0
+
+    path = tmp_path / "cutout.fits"
+    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
+
+    img = ZTFImage(str(path), "g", mock_config)
+    assert img.cutout_origin == (512.0, 256.0)
+
+
+def test_sky_to_full_quadrant_pixel_no_offset(synthetic_fits_file, mock_config):
+    """sky_to_full_quadrant_pixel equals sky_to_pixel when there is no cutout offset."""
+    from ztforce.image import ZTFImage
+
+    path, cx, cy = synthetic_fits_file
+    img = ZTFImage(str(path), "g", mock_config)
+    coord = img.pixel_to_sky(float(cx), float(cy))
+    x_cut, y_cut = img.sky_to_pixel(coord)
+    x_full, y_full = img.sky_to_full_quadrant_pixel(coord)
+    assert x_full == x_cut
+    assert y_full == y_cut
+
+
+def test_sky_to_full_quadrant_pixel_adds_offset(tmp_path, mock_config):
+    """sky_to_full_quadrant_pixel adds cutout_origin to the cutout-local coordinates."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from ztforce.image import ZTFImage
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [33, 33]
+    wcs.wcs.cdelt = [-0.000281, 0.000281]
+    wcs.wcs.crval = [150.0, 2.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    hdr = wcs.to_header()
+    hdr.update(MAGZP=26.3, OBSJD=2459000.0, GAIN=6.2, MEDFWHM=3.0, RADESYS="ICRS")
+    hdr["LTV1"] = -100.0
+    hdr["LTV2"] = -200.0
+
+    path = tmp_path / "offset.fits"
+    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
+
+    img = ZTFImage(str(path), "g", mock_config)
+    coord = img.pixel_to_sky(10.0, 10.0)
+    x_cut, y_cut = img.sky_to_pixel(coord)
+    x_full, y_full = img.sky_to_full_quadrant_pixel(coord)
+    assert abs(x_full - (x_cut + 100.0)) < 1e-6
+    assert abs(y_full - (y_cut + 200.0)) < 1e-6
+
+
 def test_radecsys_both_keywords_deletes_duplicate(tmp_path, mock_config):
     """When both RADECSYS and RADESYS are present, the duplicate RADECSYS is removed."""
     from astropy.io import fits

@@ -63,6 +63,18 @@ class ZTFImage:
         self._data = np.ascontiguousarray(raw, dtype=np.float64)
         hdul.close()
 
+    @property
+    def cutout_origin(self) -> tuple[float, float]:
+        """Pixel offset (x0, y0) of this cutout's origin within the full quadrant.
+
+        IRSA IBE cutouts include LTV1/LTV2 header keywords following the IRAF
+        convention where LTV is the negative of the cutout's 0-indexed starting
+        pixel: x_full = x_cutout - LTV1.  Returns (0.0, 0.0) for full images.
+        """
+        ltv1 = float(self.header.get("LTV1", 0.0))
+        ltv2 = float(self.header.get("LTV2", 0.0))
+        return -ltv1, -ltv2
+
     # ── derived scalar properties ─────────────────────────────────────────────
 
     @property
@@ -115,12 +127,23 @@ class ZTFImage:
         return self._wcs
 
     def sky_to_pixel(self, coord: SkyCoord) -> tuple[float, float]:
-        """Return (x, y) pixel position for a SkyCoord."""
+        """Return (x, y) pixel position within this image (cutout-local)."""
         try:
             x, y = self.wcs.world_to_pixel(coord)
             return float(x), float(y)
         except Exception as exc:
             raise WCSError(f"sky_to_pixel failed: {exc}") from exc
+
+    def sky_to_full_quadrant_pixel(self, coord: SkyCoord) -> tuple[float, float]:
+        """Return (x, y) in full-quadrant pixel coordinates.
+
+        Required for the spatially-varying DAOPhot PSF model, whose polynomial
+        coefficients are indexed to the full quadrant, not the cutout.
+        Identical to sky_to_pixel when the image is a full quadrant download.
+        """
+        x_cut, y_cut = self.sky_to_pixel(coord)
+        x0, y0 = self.cutout_origin
+        return x_cut + x0, y_cut + y0
 
     def pixel_to_sky(self, x: float, y: float) -> SkyCoord:
         """Return a SkyCoord for pixel position (x, y)."""

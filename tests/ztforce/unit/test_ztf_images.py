@@ -12,6 +12,9 @@ from astropy.io import fits
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+_RA = 150.0
+_DEC = 2.0
+
 
 def _make_row(field=468, ccdid=3, qid=2, obsjd=2459000.0, filtercode="zg"):
     return pd.Series(
@@ -37,39 +40,50 @@ def test_build_sci_url_contains_field_ccdid_qid():
     """build_sci_url URL encodes field, ccdid, qid, and filtercode."""
     from ztforce.ztf_images import build_sci_url
 
-    row = _make_row()
-    url = build_sci_url(row)
+    url = build_sci_url(_make_row(), _RA, _DEC)
     assert "000468" in url
     assert "zg" in url
     assert "c03" in url
     assert "q2" in url
 
 
+def test_build_sci_url_fits_has_cutout_params():
+    """FITS URL includes IRSA cutout center and size query parameters."""
+    from ztforce.ztf_images import build_sci_url
+
+    url = build_sci_url(_make_row(), _RA, _DEC, suffix="sciimg.fits", cutout_size_arcmin=15.0)
+    assert f"center={_RA},{_DEC}" in url
+    assert "size=" in url
+    assert "arcsec" in url
+
+
+def test_build_sci_url_psf_has_no_cutout_params():
+    """PSF sidecar URL has no cutout query parameters."""
+    from ztforce.ztf_images import build_sci_url
+
+    url = build_sci_url(_make_row(), _RA, _DEC, suffix="sciimgdao.psf")
+    assert "center=" not in url
+    assert "size=" not in url
+
+
 def test_build_sci_url_default_suffix_is_sciimg():
     """Default suffix is sciimg.fits."""
     from ztforce.ztf_images import build_sci_url
 
-    url = build_sci_url(_make_row())
-    assert url.endswith("sciimg.fits")
+    url = build_sci_url(_make_row(), _RA, _DEC)
+    assert "sciimg.fits" in url
 
 
-def test_build_sci_url_psf_suffix():
-    """Passing sciimgdao.psf suffix produces a .psf URL."""
+def test_build_sci_url_cutout_size_scales():
+    """Larger cutout_size_arcmin produces a larger size value in the URL."""
     from ztforce.ztf_images import build_sci_url
 
-    url = build_sci_url(_make_row(), suffix="sciimgdao.psf")
-    assert url.endswith("sciimgdao.psf")
-
-
-def test_build_sci_url_different_suffixes_differ():
-    """FITS and PSF URLs differ only in their suffix."""
-    from ztforce.ztf_images import build_sci_url
-
-    row = _make_row()
-    fits_url = build_sci_url(row, suffix="sciimg.fits")
-    psf_url = build_sci_url(row, suffix="sciimgdao.psf")
-    assert fits_url != psf_url
-    assert fits_url[: -len("sciimg.fits")] == psf_url[: -len("sciimgdao.psf")]
+    url_small = build_sci_url(_make_row(), _RA, _DEC, cutout_size_arcmin=5.0)
+    url_large = build_sci_url(_make_row(), _RA, _DEC, cutout_size_arcmin=20.0)
+    # Both contain "size=" but the numeric value differs
+    assert url_small != url_large
+    assert "300.0arcsec" in url_small
+    assert "1200.0arcsec" in url_large
 
 
 # ── _validate_fits ────────────────────────────────────────────────────────────
@@ -160,7 +174,7 @@ def test_download_psf_sidecar_empty_redownloads(tmp_path, mock_config):
     from ztforce.ztf_images import download_psf_sidecar
 
     path = tmp_path / "stale.psf"
-    path.write_bytes(b"")  # zero-byte → stale
+    path.write_bytes(b"")
 
     resp = mock.MagicMock()
     resp.content = b"PSF data"
@@ -245,7 +259,7 @@ def test_query_sci_metadata_raises_when_no_images(mock_config):
         mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq),
         pytest.raises(NoImagesFoundError),
     ):
-        query_sci_metadata(150.0, 2.0, "g", mock_config)
+        query_sci_metadata(_RA, _DEC, "g", mock_config)
 
 
 def test_query_sci_metadata_raises_when_none(mock_config):
@@ -260,7 +274,7 @@ def test_query_sci_metadata_raises_when_none(mock_config):
         mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq),
         pytest.raises(NoImagesFoundError),
     ):
-        query_sci_metadata(150.0, 2.0, "g", mock_config)
+        query_sci_metadata(_RA, _DEC, "g", mock_config)
 
 
 def test_query_sci_metadata_returns_sorted_df(mock_config):
@@ -277,7 +291,7 @@ def test_query_sci_metadata_returns_sorted_df(mock_config):
     mock_zq.metatable = df
 
     with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq):
-        result = query_sci_metadata(150.0, 2.0, "g", mock_config)
+        result = query_sci_metadata(_RA, _DEC, "g", mock_config)
 
     assert list(result["obsjd"]) == [2459001.0, 2459002.0]
 
@@ -287,7 +301,6 @@ def test_query_sci_metadata_returns_sorted_df(mock_config):
 
 def test_iter_sci_images_yields_paths(tmp_path, mock_config, cache):
     """iter_sci_images yields (row, fits_path, psf_path) for each image."""
-    # Write the files that would be "downloaded" into the cache
     from ztforce.cache import fits_path as fp
     from ztforce.cache import psf_path as pp
     from ztforce.ztf_images import iter_sci_images
@@ -307,7 +320,7 @@ def test_iter_sci_images_yields_paths(tmp_path, mock_config, cache):
         mock.patch("ztforce.ztf_images.download_fits", return_value=lf),
         mock.patch("ztforce.ztf_images.download_psf_sidecar", return_value=lp),
     ):
-        results = list(iter_sci_images(150.0, 2.0, "g", cache, mock_config))
+        results = list(iter_sci_images(_RA, _DEC, "g", cache, mock_config))
 
     assert len(results) == 1
     _, out_fits, out_psf = results[0]
@@ -328,6 +341,6 @@ def test_iter_sci_images_skips_failed_downloads(tmp_path, mock_config, cache):
         mock.patch("ztforce.ztf_images.build_sci_url", return_value="http://fake"),
         mock.patch("ztforce.ztf_images.download_fits", side_effect=FITSDownloadError("fail")),
     ):
-        results = list(iter_sci_images(150.0, 2.0, "g", cache, mock_config))
+        results = list(iter_sci_images(_RA, _DEC, "g", cache, mock_config))
 
     assert results == []

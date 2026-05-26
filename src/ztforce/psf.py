@@ -143,10 +143,11 @@ def forced_phot_at_position(
 
     try:
         x0, y0 = image.sky_to_pixel(target_coord)
+        x0_full, y0_full = image.sky_to_full_quadrant_pixel(target_coord)
     except WCSError:
         return nan_result
 
-    # Integer center pixel
+    # Integer center pixel (cutout-local for array indexing)
     xi, yi = int(round(x0)), int(round(y0))
     psf_size = parsed_psf["psf_size"]
     half = psf_size // 2
@@ -163,8 +164,8 @@ def forced_phot_at_position(
     # Extract image cutout
     cutout = image.image_sub[yi - half : yi + half + 1, xi - half : xi + half + 1].copy()
 
-    # PSF model at this position (x=column, y=row in WCS convention)
-    psf_stamp = reconstruct_psf(parsed_psf, x0, y0)
+    # PSF model uses full-quadrant coordinates for the spatially-varying polynomial
+    psf_stamp = reconstruct_psf(parsed_psf, x0_full, y0_full)
 
     # Noise model: sqrt(|sky| / gain + bkg.rms^2)
     bkg_rms = image.bkg.rms()[yi - half : yi + half + 1, xi - half : xi + half + 1]

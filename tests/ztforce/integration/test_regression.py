@@ -21,7 +21,8 @@ _DEC = 19.69525
 _PS1_G = 15.824
 _MAG_TOL = 0.10  # maximum allowed offset from PS1
 _SCATTER_MAX = 0.05  # maximum allowed epoch-to-epoch scatter
-_MIN_DETECTIONS = 3  # SNR > 3 epochs required
+_MAX_EPOCHS = 30  # cap downloads so the test completes in ~2 minutes
+_MIN_DETECTIONS = 10  # bright star — most epochs should be clean detections
 
 
 @pytest.mark.network
@@ -38,6 +39,7 @@ def test_gband_lightcurve_matches_ps1(tmp_path):
         config=config,
         n_download_workers=4,
         n_psf_workers=2,
+        max_epochs=_MAX_EPOCHS,
     )
     assert "g" in lcs, "No g-band lightcurve returned"
 
@@ -46,9 +48,10 @@ def test_gband_lightcurve_matches_ps1(tmp_path):
 
     # Require at least _MIN_DETECTIONS epochs above SNR threshold
     detections = df[(df["flags"] == 0) & (~df["mag"].isna()) & (df["mag"] < 99)]
-    assert (
-        len(detections) >= _MIN_DETECTIONS
-    ), f"Only {len(detections)} clean detections; expected ≥{_MIN_DETECTIONS}"
+    assert len(detections) >= _MIN_DETECTIONS, (
+        f"Only {len(detections)} clean detections out of {_MAX_EPOCHS} epochs; "
+        f"expected ≥{_MIN_DETECTIONS}"
+    )
 
     median_g = float(np.median(detections["mag"].values))
     scatter = float(np.std(detections["mag"].values))

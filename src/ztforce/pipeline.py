@@ -169,11 +169,13 @@ def run_forced_photometry(
     config: ZTForceConfig | None = None,
     n_download_workers: int = 4,
     n_psf_workers: int = 4,
+    max_epochs: int | None = None,
 ) -> dict[str, Lightcurve]:
     """Run forced PSF photometry at (ra, dec) for all requested bands.
 
     Returns a dict mapping band → Lightcurve.
     Lightcurves are loaded from cache when available; otherwise computed and saved.
+
     """
     cache = make_cache(data_dir)
     if config is None:
@@ -194,6 +196,9 @@ def run_forced_photometry(
             df = query_sci_metadata(ra, dec, band, config)
         except NoImagesFoundError:
             continue
+
+        if max_epochs is not None:
+            df = df.tail(max_epochs).reset_index(drop=True)
 
         # Download phase (threaded)
         image_triples = _download_all(df, ra, dec, band, cache, config, n_download_workers)

@@ -1,7 +1,7 @@
 
 # ztforce
 
-PSF photometry on ZTF science images, calibrated against PanSTARRS
+Forced PSF photometry on ZTF science images — measures flux at a fixed sky position in every available epoch, even below the detection threshold, producing a calibrated AB-magnitude lightcurve.
 
 [![Template](https://img.shields.io/badge/Template-LINCC%20Frameworks%20Python%20Project%20Template-brightgreen)](https://lincc-ppt.readthedocs.io/en/latest/)
 
@@ -10,14 +10,58 @@ PSF photometry on ZTF science images, calibrated against PanSTARRS
 [![Codecov](https://codecov.io/gh/Adam-Boesky/ztforce/branch/main/graph/badge.svg)](https://codecov.io/gh/Adam-Boesky/ztforce)
 [![Read The Docs](https://img.shields.io/readthedocs/ztforce)](https://ztforce.readthedocs.io/)
 
-This project was automatically generated using the LINCC-Frameworks 
-[python-project-template](https://github.com/lincc-frameworks/python-project-template).
+## Installation
 
-A repository badge was added to show that this project uses the python-project-template, however it's up to
-you whether or not you'd like to display it!
+```bash
+pip install ztforce
+```
 
-For more information about the project template see the 
-[documentation](https://lincc-ppt.readthedocs.io/en/latest/).
+**Python 3.10–3.13** is supported.
+
+> **Apple Silicon (M1/M2/M3) note:** the `sep` dependency may need to be installed
+> via conda before `pip install ztforce`:
+> ```bash
+> conda install -c conda-forge sep
+> pip install ztforce
+> ```
+
+### Credentials
+
+ztforce downloads ZTF science images from IRSA and requires an IRSA account
+(free at [irsa.ipac.caltech.edu](https://irsa.ipac.caltech.edu)). Set your
+credentials in one of three ways:
+
+**Environment variables (recommended for scripts/CI):**
+```bash
+export ZTFORCE_IRSA_USER=your_username
+export ZTFORCE_IRSA_PASS=your_password
+```
+
+**Config file** at `~/.ztforce/config.toml`:
+```toml
+[credentials]
+irsa_user = "your_username"
+irsa_pass = "your_password"
+```
+
+**Direct argument:**
+```python
+from ztforce import build_config
+config = build_config(irsa_user="your_username", irsa_pass="your_password")
+```
+
+## Quick start
+
+```python
+from ztforce import run_forced_photometry
+
+# Measure flux at a fixed position across all ZTF g- and r-band epochs
+lcs = run_forced_photometry(ra=210.08, dec=-6.88, bands=["g", "r"])
+
+lcs["g"].plot()          # plot the lightcurve
+lcs["g"].stack()         # inverse-variance weighted stack
+lcs["g"].save("my_source_g.ecsv")   # save to ECSV
+```
 
 ## Dev Guide - Getting Started
 

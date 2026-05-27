@@ -1,4 +1,8 @@
 
+<p align="center">
+  <img src="ztforce_logo.svg" alt="ztforce logo" width="400"/>
+</p>
+
 # ztforce
 
 Forced PSF photometry on ZTF science images — measures flux at a fixed sky position in every available epoch, even below the detection threshold, producing a calibrated AB-magnitude lightcurve.

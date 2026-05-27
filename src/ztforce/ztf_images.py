@@ -50,7 +50,8 @@ def query_sci_metadata(
             if df is None or df.empty:
                 raise NoImagesFoundError(f"No ZTF {band}-band science images found at ({ra:.5f}, {dec:.5f}).")
             if not _REQUIRED_METADATA_COLS.issubset(df.columns):
-                raise NoImagesFoundError(
+                # Service returned garbage (e.g. HTML error page) — treat as transient and retry.
+                raise RuntimeError(
                     f"IRSA metadata query returned unexpected response "
                     f"(columns: {list(df.columns)[:5]}). "
                     f"The service may be temporarily unavailable."

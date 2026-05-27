@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy.table import Table
-from matplotlib.axes import Axes
 
-BAND_COLORS = {"g": "forestgreen", "r": "lightcoral", "i": "darkorchid"}
 _BAND_ORDER = ["g", "r", "i"]
 SNT = 3.0  # detection signal-to-noise threshold
 SNU = 5.0  # sigma multiplier for upper-limit arrows
@@ -159,72 +156,6 @@ class Lightcurve:
             for band, row in sub.iterrows():
                 records.append({"obsjd_center": jd_c, "band": band, **row.to_dict()})
         return pd.DataFrame(records)
-
-    # ── Plotting ──────────────────────────────────────────────────────────────
-
-    def plot(
-        self,
-        bands: list[str] | None = None,
-        ax: Axes | None = None,
-        y_units: str = "mag",
-        colors: dict | None = None,
-        include_upper_lim: bool = True,
-        **kwargs,
-    ) -> Axes:
-        """Plot the lightcurve as detections + upper-limit arrows.
-
-        y_units: 'mag' (default) or 'flux'.
-        """
-        if ax is None:
-            _, ax = plt.subplots(figsize=(10, 4))
-        cols = colors or BAND_COLORS
-        target_bands = bands or self.bands
-
-        for band in target_bands:
-            color = cols.get(band, "grey")
-            sub = self.get_band(band)
-            det = sub[sub["detection"]]
-            non_det = sub[~sub["detection"] & np.isfinite(sub["upper_limit"])]
-
-            if y_units == "mag":
-                if not det.empty:
-                    ax.errorbar(
-                        det["obsjd"],
-                        det["mag"],
-                        yerr=det["mag_err"],
-                        fmt="o",
-                        color=color,
-                        label=f"ZTF-{band}",
-                        **kwargs,
-                    )
-                if include_upper_lim and not non_det.empty:
-                    ax.errorbar(
-                        non_det["obsjd"],
-                        non_det["upper_limit"],
-                        yerr=0.2,
-                        uplims=True,
-                        fmt="none",
-                        color=color,
-                        alpha=0.4,
-                    )
-                ax.invert_yaxis()
-                ax.set_ylabel("AB magnitude")
-            else:
-                if not det.empty:
-                    ax.errorbar(
-                        det["obsjd"],
-                        det["flux"],
-                        yerr=det["flux_err"],
-                        fmt="o",
-                        color=color,
-                        label=f"ZTF-{band}",
-                        **kwargs,
-                    )
-                ax.set_ylabel("Flux (ADU)")
-
-        ax.set_xlabel("JD")
-        ax.legend()
-        return ax
 
     # ── Persistence ──────────────────────────────────────────────────────────
 

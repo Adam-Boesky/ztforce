@@ -297,30 +297,3 @@ def test_len_matches_epoch_count():
 
 
 # ── plot (smoke test) ─────────────────────────────────────────────────────────
-
-
-def test_plot_returns_axes():
-    """plot() returns a matplotlib Axes object."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    from matplotlib.axes import Axes
-
-    lc = _make_lc()
-    _add_detection(lc, obsjd=2459000.0)
-    _add_non_detection(lc, obsjd=2459100.0)
-    ax = lc.plot()
-    assert isinstance(ax, Axes)
-
-
-def test_plot_flux_units():
-    """plot() with y_units='flux' returns Axes without error."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    from matplotlib.axes import Axes
-
-    lc = _make_lc()
-    _add_detection(lc)
-    ax = lc.plot(y_units="flux")
-    assert isinstance(ax, Axes)

@@ -20,29 +20,6 @@ def test_make_cache_explicit_root(tmp_path):
     assert cache.root == tmp_path / "mydata"
 
 
-def test_fits_path_encoding(cache):
-    """fits_path encodes field/ccdid/qid/band/obsjd into the filename."""
-    from ztforce.cache import fits_path
-
-    p = fits_path(cache, 468, 3, 2, "g", 2459271.12345)
-    assert p.suffix == ".fits"
-    assert "000468" in p.name
-    assert "_03_" in p.name
-    assert "_2_" in p.name
-    assert "_g_" in p.name
-    assert "2459271" in p.name
-
-
-def test_psf_path_encoding(cache):
-    """psf_path produces .psf files in the psf/ subdirectory."""
-    from ztforce.cache import psf_path
-
-    p = psf_path(cache, 468, 3, 2, "g", 2459271.12345)
-    assert p.suffix == ".psf"
-    assert p.parent.name == "psf"
-    assert "000468" in p.name
-
-
 def test_lightcurve_path_encoding(cache):
     """lightcurve_path encodes ra/dec into the directory and band into the filename."""
     from ztforce.cache import lightcurve_path
@@ -54,15 +31,6 @@ def test_lightcurve_path_encoding(cache):
     assert "-2.54321" in str(p)
 
 
-def test_paths_are_deterministic(cache):
-    """Same inputs always produce the same path."""
-    from ztforce.cache import fits_path
-
-    p1 = fits_path(cache, 100, 1, 1, "g", 2458000.0)
-    p2 = fits_path(cache, 100, 1, 1, "g", 2458000.0)
-    assert p1 == p2
-
-
 def test_different_bands_give_different_paths(cache):
     """Different bands produce different lightcurve paths."""
     from ztforce.cache import lightcurve_path
@@ -72,13 +40,9 @@ def test_different_bands_give_different_paths(cache):
     assert pg != pr
 
 
-def test_directories_created_on_first_access(cache):
-    """Parent directories are created when a path function is first called."""
-    from ztforce.cache import fits_path, lightcurve_path, psf_path
-
-    for fn in [fits_path, psf_path]:
-        p = fn(cache, 1, 1, 1, "g", 1.0)
-        assert p.parent.exists()
+def test_lightcurve_directory_created_on_first_access(cache):
+    """lightcurve_path creates parent directories on first call."""
+    from ztforce.cache import lightcurve_path
 
     lc = lightcurve_path(cache, 0.0, 0.0, "g")
     assert lc.parent.exists()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import random
 import time
-from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
@@ -13,7 +12,6 @@ from astropy.io import fits
 from ztfquery import buildurl
 from ztfquery import query as zquery
 
-from .cache import CacheConfig, fits_path, psf_path
 from .config import ZTForceConfig
 from .exceptions import FITSDownloadError, NoImagesFoundError
 
@@ -52,7 +50,8 @@ def query_sci_metadata(
             if df is None or df.empty:
                 raise NoImagesFoundError(f"No ZTF {band}-band science images found at ({ra:.5f}, {dec:.5f}).")
             if not _REQUIRED_METADATA_COLS.issubset(df.columns):
-                raise NoImagesFoundError(
+                # Service returned garbage (e.g. HTML error page) — treat as transient and retry.
+                raise RuntimeError(
                     f"IRSA metadata query returned unexpected response "
                     f"(columns: {list(df.columns)[:5]}). "
                     f"The service may be temporarily unavailable."
@@ -146,52 +145,12 @@ def _download_with_retry(
 
 
 def download_fits(url: str, dest: Path, config: ZTForceConfig) -> Path:
-    """Download a FITS cutout, checking the cache first."""
-    if dest.exists() and _validate_fits(dest):
-        return dest
+    """Download a FITS cutout to dest."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     return _download_with_retry(url, dest, config, validate=True)
 
 
 def download_psf_sidecar(url: str, dest: Path, config: ZTForceConfig) -> Path:
-    """Download a DAOPhot PSF sidecar (.psf) file, checking the cache first."""
-    if dest.exists() and dest.stat().st_size > 0:
-        return dest
+    """Download a DAOPhot PSF sidecar (.psf) file to dest."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     return _download_with_retry(url, dest, config, validate=False)
-
-
-def iter_sci_images(
-    ra: float,
-    dec: float,
-    band: str,
-    cache: CacheConfig,
-    config: ZTForceConfig,
-) -> Iterator[tuple[pd.Series, Path, Path]]:
-    """Yield (metadata_row, fits_path, psf_sidecar_path) for every available epoch.
-
-    FITS files are downloaded as cutouts centred on (ra, dec).
-    Files are skipped on download failure.
-    """
-    df = query_sci_metadata(ra, dec, band, config)
-    for _, row in df.iterrows():
-        field = int(row["field"])
-        ccdid = int(row["ccdid"])
-        qid = int(row["qid"])
-        obsjd = float(row["obsjd"])
-
-        local_fits = fits_path(cache, field, ccdid, qid, band, obsjd)
-        local_psf = psf_path(cache, field, ccdid, qid, band, obsjd)
-
-        fits_url = build_sci_url(
-            row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin
-        )
-        psf_url = build_sci_url(row, ra, dec, suffix="sciimgdao.psf")
-
-        try:
-            download_fits(fits_url, local_fits, config)
-            download_psf_sidecar(psf_url, local_psf, config)
-        except FITSDownloadError:
-            continue
-
-        yield row, local_fits, local_psf

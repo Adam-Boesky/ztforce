@@ -1,14 +1,22 @@
-"""Orchestration: parallel download + forced PSF photometry."""
+"""Orchestration: forced PSF photometry with source-level batch parallelism."""
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import contextlib
+import hashlib
+import json
+import tempfile
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 import pandas as pd
 from astropy.coordinates import SkyCoord
+from tqdm.auto import tqdm
 
-from .cache import CacheConfig, lightcurve_path, make_cache
+from ._constants import _PHOTOMETRY_VERSION
+from .cache import lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError
 from .image import ZTFImage
@@ -16,28 +24,56 @@ from .lightcurve import Lightcurve
 from .psf import forced_phot_at_position, parse_daophot_psf
 from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata
 
-# ── Worker (must be importable at module level for ProcessPoolExecutor on macOS) ──
+# ── Cache key ────────────────────────────────────────────────────────────────
 
 
-def _process_one_image(
+def _cache_key(config: ZTForceConfig, max_epochs: int | None) -> str:
+    """12-hex-char hash of the parameters that affect photometry output."""
+    params = {
+        "photometry_version": _PHOTOMETRY_VERSION,
+        "cutout_size_arcmin": config.cutout_size_arcmin,
+        "default_gain": config.default_gain,
+        "max_epochs": max_epochs,
+    }
+    blob = json.dumps(params, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+# ── Per-epoch workers ────────────────────────────────────────────────────────
+
+
+def _download_epoch(
+    row: pd.Series,
+    tmp_dir: Path,
+    ra: float,
+    dec: float,
+    config: ZTForceConfig,
+) -> tuple[pd.Series, Path, Path]:
+    """Download the FITS cutout and PSF sidecar for one epoch.
+
+    Raises on failure so the caller can skip this epoch.
+    """
+    obsjd = float(row["obsjd"])
+    stem = f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{obsjd:.3f}"
+    local_fits = tmp_dir / f"{stem}.fits"
+    local_psf = tmp_dir / f"{stem}.psf"
+    fits_url = build_sci_url(row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin)
+    psf_url = build_sci_url(row, ra, dec, suffix="sciimgdao.psf")
+    download_fits(fits_url, local_fits, config)
+    download_psf_sidecar(psf_url, local_psf, config)
+    return row, local_fits, local_psf
+
+
+def _process_one_epoch(
     fits_fpath: str,
     psf_fpath: str,
     ra: float,
     dec: float,
     band: str,
     image_id: str,
-    irsa_user: str,
-    irsa_pass: str,
-    default_gain: float,
+    config: ZTForceConfig,
 ) -> dict:
-    """Run forced PSF photometry for one image. Returns a result dict."""
-    from .config import ZTForceConfig
-
-    config = ZTForceConfig(
-        irsa_user=irsa_user,
-        irsa_pass=irsa_pass,
-        default_gain=default_gain,
-    )
+    """Run forced PSF photometry for one epoch. Returns a result dict."""
     try:
         img = ZTFImage(fits_fpath, band, config)
         parsed_psf = parse_daophot_psf(psf_fpath)
@@ -63,99 +99,8 @@ def _process_one_image(
             image_id=image_id,
             band=band,
         )
-        import traceback
-
         traceback.print_exc()
     return result
-
-
-def _worker_kwargs(config: ZTForceConfig) -> dict:
-    """Extract picklable config fields for the worker function."""
-    return dict(
-        irsa_user=config.irsa_user,
-        irsa_pass=config.irsa_pass,
-        default_gain=config.default_gain,
-    )
-
-
-# ── Download phase (I/O-bound, threaded) ─────────────────────────────────────
-
-
-def _download_all(
-    df: pd.DataFrame,
-    ra: float,
-    dec: float,
-    band: str,
-    cache: CacheConfig,
-    config: ZTForceConfig,
-    n_workers: int,
-) -> list[tuple[pd.Series, Path, Path]]:
-    """Download all FITS cutouts + PSF sidecars in parallel."""
-    from .cache import fits_path as _fits_path
-    from .cache import psf_path as _psf_path
-
-    def _download_one(row):
-        field = int(row["field"])
-        ccdid = int(row["ccdid"])
-        qid = int(row["qid"])
-        obsjd = float(row["obsjd"])
-        local_fits = _fits_path(cache, field, ccdid, qid, band, obsjd)
-        local_psf = _psf_path(cache, field, ccdid, qid, band, obsjd)
-        fits_url = build_sci_url(
-            row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin
-        )
-        psf_url = build_sci_url(row, ra, dec, suffix="sciimgdao.psf")
-        try:
-            download_fits(fits_url, local_fits, config)
-            download_psf_sidecar(psf_url, local_psf, config)
-            return row, local_fits, local_psf
-        except Exception:
-            return None
-
-    results = []
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_download_one, row): i for i, (_, row) in enumerate(df.iterrows())}
-        for future in as_completed(futures):
-            res = future.result()
-            if res is not None:
-                results.append(res)
-    # Re-sort by obsjd
-    results.sort(key=lambda t: float(t[0]["obsjd"]))
-    return results
-
-
-# ── PSF photometry phase (CPU-bound, multiprocess) ────────────────────────────
-
-
-def _run_psf_parallel(
-    image_triples: list[tuple[pd.Series, Path, Path]],
-    ra: float,
-    dec: float,
-    band: str,
-    config: ZTForceConfig,
-    n_workers: int,
-) -> list[dict]:
-    """Run forced PSF photometry on all images in parallel processes."""
-    wkwargs = _worker_kwargs(config)
-    args_list = [
-        (
-            str(fits_p),
-            str(psf_p),
-            ra,
-            dec,
-            band,
-            f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.3f}",
-        )
-        for row, fits_p, psf_p in image_triples
-    ]
-
-    results = []
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = [executor.submit(_process_one_image, *args, **wkwargs) for args in args_list]
-        for future in as_completed(futures):
-            results.append(future.result())
-    results.sort(key=lambda d: d.get("obsjd", 0))
-    return results
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -167,9 +112,13 @@ def run_forced_photometry(
     bands: tuple[str, ...] | list[str] = ("g", "r", "i"),
     data_dir: str | Path | None = None,
     config: ZTForceConfig | None = None,
-    n_download_workers: int = 4,
-    n_psf_workers: int = 4,
     max_epochs: int | None = None,
+    force_recompute: bool = False,
+    show_progress: bool = True,
+    download_workers: int = 8,
+    _tqdm_position: int = 0,
+    _tqdm_leave: bool = True,
+    _download_executor: ThreadPoolExecutor | None = None,
 ) -> dict[str, Lightcurve]:
     """Run forced PSF photometry at (ra, dec) for all requested bands.
 
@@ -186,10 +135,13 @@ def run_forced_photometry(
             ``~/.ztforce/cache`` when ``None``.
         config: Credentials and runtime settings.  Built from environment
             variables / ``~/.ztforce/config.toml`` when ``None``.
-        n_download_workers: Number of parallel threads for FITS downloads.
-        n_psf_workers: Number of parallel processes for PSF photometry.
         max_epochs: If set, process only the *most recent* ``max_epochs``
             exposures per band.  Useful for quick tests.
+        force_recompute: If ``True``, ignore any cached lightcurve and
+            redownload + recompute from scratch, overwriting the cache.
+        show_progress: If ``True`` (default), display a tqdm progress bar.
+        download_workers: Number of concurrent epoch downloads.  Ignored when
+            a shared ``_download_executor`` is supplied by the batch wrapper.
 
     Returns:
         Dict mapping band label (``"g"``, ``"r"``, ``"i"``) to a
@@ -200,55 +152,107 @@ def run_forced_photometry(
     if config is None:
         config = build_config()
 
+    ck = _cache_key(config, max_epochs)
     lightcurves: dict[str, Lightcurve] = {}
 
-    for band in bands:
-        lc_fpath = lightcurve_path(cache, ra, dec, band)
+    # Use a shared executor supplied by the batch wrapper, or own one locally.
+    _own_executor = _download_executor is None
+    dl_exec = _download_executor or ThreadPoolExecutor(max_workers=download_workers)
 
-        # Cache hit: skip download + photometry entirely
-        if lc_fpath.exists():
-            lightcurves[band] = Lightcurve.load(lc_fpath)
-            continue
+    try:
+        for band in bands:
+            lc_fpath = lightcurve_path(cache, ra, dec, band)
 
-        # Query metadata
-        try:
-            df = query_sci_metadata(ra, dec, band, config)
-        except NoImagesFoundError:
-            continue
+            # Cache hit: load and return if the key matches
+            if lc_fpath.exists() and not force_recompute:
+                lc = Lightcurve.load(lc_fpath)
+                if lc.cache_key == ck:
+                    if show_progress:
+                        tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
+                    lightcurves[band] = lc
+                    continue
+                # stale cache (settings changed) — fall through and recompute
 
-        if max_epochs is not None:
-            df = df.tail(max_epochs).reset_index(drop=True)
-
-        # Download phase (threaded)
-        image_triples = _download_all(df, ra, dec, band, cache, config, n_download_workers)
-        if not image_triples:
-            continue
-
-        # PSF photometry phase (multiprocess)
-        results = _run_psf_parallel(image_triples, ra, dec, band, config, n_psf_workers)
-
-        # Assemble lightcurve
-        lc = Lightcurve(ra=ra, dec=dec)
-        for res in results:
-            if not res.get("obsjd") or (res.get("obsjd") != res.get("obsjd")):
+            # Query metadata
+            try:
+                df = query_sci_metadata(ra, dec, band, config)
+            except NoImagesFoundError:
                 continue
-            lc.add_epoch(
-                obsjd=res["obsjd"],
-                band=band,
-                flux=res["flux"],
-                flux_err=res["flux_err"],
-                mag=res["mag"],
-                mag_err=res["mag_err"],
-                zero_point=res["zero_point"],
-                flags=res["flags"],
-                x_fit=res.get("x_fit"),
-                y_fit=res.get("y_fit"),
-                mag_limit=res.get("mag_limit"),
-                image_id=res.get("image_id"),
+
+            if max_epochs is not None:
+                df = df.tail(max_epochs).reset_index(drop=True)
+
+            desc_base = f"({ra:.3f}, {dec:.3f}) [{band}]"
+            bar = tqdm(
+                total=2 * len(df),
+                desc=f"{desc_base} downloading",
+                position=_tqdm_position,
+                leave=_tqdm_leave,
+                disable=not show_progress,
+                unit="step",
             )
 
-        lc.save(lc_fpath)
-        lightcurves[band] = lc
+            with tempfile.TemporaryDirectory() as _tmp:
+                tmp_dir = Path(_tmp)
+
+                # Download phase: all epochs submitted at once, collected as they finish
+                image_triples: list[tuple[pd.Series, Path, Path]] = []
+                dl_futures = {
+                    dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config): row
+                    for _, row in df.iterrows()
+                }
+                for fut in as_completed(dl_futures):
+                    with contextlib.suppress(Exception):
+                        image_triples.append(fut.result())
+                    bar.update(1)
+
+                if not image_triples:
+                    bar.close()
+                    continue
+
+                # PSF photometry phase: sequential (CPU-fast, ~15 ms/epoch)
+                bar.set_description(f"{desc_base} fitting PSF")
+                results = []
+                for row, fits_p, psf_p in image_triples:
+                    image_id = (
+                        f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.3f}"
+                    )
+                    results.append(
+                        _process_one_epoch(str(fits_p), str(psf_p), ra, dec, band, image_id, config)
+                    )
+                    bar.update(1)
+
+            bar.close()
+
+            results.sort(key=lambda d: d.get("obsjd", 0))
+
+            # Assemble lightcurve
+            lc = Lightcurve(ra=ra, dec=dec)
+            for res in results:
+                if not res.get("obsjd") or (res.get("obsjd") != res.get("obsjd")):
+                    continue
+                lc.add_epoch(
+                    obsjd=res["obsjd"],
+                    band=band,
+                    flux=res["flux"],
+                    flux_err=res["flux_err"],
+                    mag=res["mag"],
+                    mag_err=res["mag_err"],
+                    zero_point=res["zero_point"],
+                    flags=res["flags"],
+                    x_fit=res.get("x_fit"),
+                    y_fit=res.get("y_fit"),
+                    mag_limit=res.get("mag_limit"),
+                    image_id=res.get("image_id"),
+                )
+
+            lc.cache_key = ck
+            lc.save(lc_fpath)
+            lightcurves[band] = lc
+
+    finally:
+        if _own_executor:
+            dl_exec.shutdown(wait=False)
 
     return lightcurves
 
@@ -258,26 +262,83 @@ def run_forced_photometry_batch(
     bands: tuple[str, ...] | list[str] = ("g", "r", "i"),
     data_dir: str | Path | None = None,
     config: ZTForceConfig | None = None,
-    n_download_workers: int = 4,
-    n_psf_workers: int = 4,
+    n_workers: int = 4,
+    download_workers: int = 8,
+    show_progress: bool = True,
 ) -> list[dict[str, Lightcurve]]:
-    """Run forced photometry for a list of SkyCoord targets.
+    """Run forced photometry for a list of SkyCoord targets in parallel.
 
-    Returns a list of band → Lightcurve dicts, one per target.
-    All targets share cached FITS files when they fall on the same image.
+    Each target is processed by a dedicated thread; results are returned in the
+    same order as ``targets``.  A single shared download thread pool (capped at
+    ``download_workers``) is used across all active source workers so that
+    concurrency is bounded at one level only.
+
+    Args:
+        targets: Sky positions to process.
+        bands: ZTF bands to process.  Any subset of ``("g", "r", "i")``.
+        data_dir: Root directory for the on-disk cache.
+        config: Credentials and runtime settings.
+        n_workers: Number of targets to process concurrently.
+        download_workers: Total number of concurrent epoch downloads shared
+            across all active source workers.
+        show_progress: If ``True`` (default), display tqdm progress bars.
+
+    Returns:
+        List of band → :class:`~ztforce.Lightcurve` dicts, one per target.
     """
     if config is None:
         config = build_config()
 
-    return [
-        run_forced_photometry(
-            ra=float(coord.ra.deg),
-            dec=float(coord.dec.deg),
-            bands=bands,
-            data_dir=data_dir,
-            config=config,
-            n_download_workers=n_download_workers,
-            n_psf_workers=n_psf_workers,
-        )
-        for coord in targets
-    ]
+    # Thread-safe pool of tqdm positions 1..n_workers.
+    # Position 0 is reserved for the top-level Sources bar.
+    _pool_lock = Lock()
+    _positions: list[int] = list(range(1, n_workers + 1))
+
+    def _acquire_position() -> int:
+        with _pool_lock:
+            return _positions.pop(0) if _positions else 0
+
+    def _release_position(pos: int) -> None:
+        with _pool_lock:
+            if pos > 0:
+                _positions.append(pos)
+                _positions.sort()
+
+    main_bar = tqdm(
+        total=len(targets),
+        desc="Sources",
+        position=0,
+        leave=True,
+        disable=not show_progress,
+        unit="source",
+    )
+
+    # One shared download pool for all source workers combined.
+    with ThreadPoolExecutor(max_workers=download_workers) as dl_exec:
+
+        def _run_one(coord: SkyCoord) -> dict[str, Lightcurve]:
+            pos = _acquire_position()
+            try:
+                return run_forced_photometry(
+                    ra=float(coord.ra.deg),
+                    dec=float(coord.dec.deg),
+                    bands=bands,
+                    data_dir=data_dir,
+                    config=config,
+                    show_progress=show_progress,
+                    _tqdm_position=pos,
+                    _tqdm_leave=False,
+                    _download_executor=dl_exec,
+                )
+            finally:
+                _release_position(pos)
+                main_bar.update(1)
+
+        results: list[dict[str, Lightcurve]] = [{}] * len(targets)
+        with ThreadPoolExecutor(max_workers=n_workers) as src_exec:
+            future_to_idx = {src_exec.submit(_run_one, coord): i for i, coord in enumerate(targets)}
+            for future in as_completed(future_to_idx):
+                results[future_to_idx[future]] = future.result()
+
+    main_bar.close()
+    return results

@@ -116,25 +116,11 @@ def test_validate_fits_empty_file(tmp_path):
     assert _validate_fits(path) is False
 
 
-# ── download_fits (cache hit) ─────────────────────────────────────────────────
+# ── download_fits ─────────────────────────────────────────────────────────────
 
 
-def test_download_fits_cache_hit_skips_request(tmp_path, mock_config):
-    """download_fits returns immediately when a valid file is already cached."""
-    from ztforce.ztf_images import download_fits
-
-    path = tmp_path / "cached.fits"
-    _write_valid_fits(path)
-
-    with mock.patch("ztforce.ztf_images.requests.get") as mock_get:
-        result = download_fits("http://fake/url", path, mock_config)
-
-    mock_get.assert_not_called()
-    assert result == path
-
-
-def test_download_fits_cache_miss_triggers_request(tmp_path, mock_config):
-    """download_fits fetches the URL when the file is absent."""
+def test_download_fits_triggers_request(tmp_path, mock_config):
+    """download_fits fetches the URL and writes the result to dest."""
     from ztforce.ztf_images import download_fits
 
     path = tmp_path / "new.fits"
@@ -155,27 +141,11 @@ def test_download_fits_cache_miss_triggers_request(tmp_path, mock_config):
 # ── download_psf_sidecar ──────────────────────────────────────────────────────
 
 
-def test_download_psf_sidecar_cache_hit(tmp_path, mock_config):
-    """download_psf_sidecar skips the network when a non-empty file exists."""
+def test_download_psf_sidecar_writes_bytes(tmp_path, mock_config):
+    """download_psf_sidecar fetches the URL and writes the result to dest."""
     from ztforce.ztf_images import download_psf_sidecar
 
-    path = tmp_path / "cached.psf"
-    path.write_text("PSF content")
-
-    with mock.patch("ztforce.ztf_images.requests.get") as mock_get:
-        result = download_psf_sidecar("http://fake/url", path, mock_config)
-
-    mock_get.assert_not_called()
-    assert result == path
-
-
-def test_download_psf_sidecar_empty_redownloads(tmp_path, mock_config):
-    """download_psf_sidecar re-downloads when cached file is zero bytes."""
-    from ztforce.ztf_images import download_psf_sidecar
-
-    path = tmp_path / "stale.psf"
-    path.write_bytes(b"")
-
+    path = tmp_path / "new.psf"
     resp = mock.MagicMock()
     resp.content = b"PSF data"
     resp.raise_for_status = mock.MagicMock()
@@ -283,8 +253,8 @@ def test_query_sci_metadata_returns_sorted_df(mock_config):
 
     df = pd.DataFrame(
         [
-            {"obsjd": 2459002.0, "field": 1, "ccdid": 1, "qid": 1},
-            {"obsjd": 2459001.0, "field": 1, "ccdid": 1, "qid": 1},
+            {"obsjd": 2459002.0, "field": 1, "ccdid": 1, "qid": 1, "filtercode": "zg", "filefracday": 1},
+            {"obsjd": 2459001.0, "field": 1, "ccdid": 1, "qid": 1, "filtercode": "zg", "filefracday": 1},
         ]
     )
     mock_zq = mock.MagicMock()
@@ -294,53 +264,3 @@ def test_query_sci_metadata_returns_sorted_df(mock_config):
         result = query_sci_metadata(_RA, _DEC, "g", mock_config)
 
     assert list(result["obsjd"]) == [2459001.0, 2459002.0]
-
-
-# ── iter_sci_images ───────────────────────────────────────────────────────────
-
-
-def test_iter_sci_images_yields_paths(tmp_path, mock_config, cache):
-    """iter_sci_images yields (row, fits_path, psf_path) for each image."""
-    from ztforce.cache import fits_path as fp
-    from ztforce.cache import psf_path as pp
-    from ztforce.ztf_images import iter_sci_images
-
-    row = _make_row(obsjd=2459000.0)
-    lf = fp(cache, int(row["field"]), int(row["ccdid"]), int(row["qid"]), "g", float(row["obsjd"]))
-    lp = pp(cache, int(row["field"]), int(row["ccdid"]), int(row["qid"]), "g", float(row["obsjd"]))
-    lf.parent.mkdir(parents=True, exist_ok=True)
-    lp.parent.mkdir(parents=True, exist_ok=True)
-    _write_valid_fits(lf)
-    lp.write_text("PSF content")
-
-    df = pd.DataFrame([row])
-    with (
-        mock.patch("ztforce.ztf_images.query_sci_metadata", return_value=df),
-        mock.patch("ztforce.ztf_images.build_sci_url", return_value="http://fake"),
-        mock.patch("ztforce.ztf_images.download_fits", return_value=lf),
-        mock.patch("ztforce.ztf_images.download_psf_sidecar", return_value=lp),
-    ):
-        results = list(iter_sci_images(_RA, _DEC, "g", cache, mock_config))
-
-    assert len(results) == 1
-    _, out_fits, out_psf = results[0]
-    assert out_fits == lf
-    assert out_psf == lp
-
-
-def test_iter_sci_images_skips_failed_downloads(tmp_path, mock_config, cache):
-    """iter_sci_images silently skips images whose download raises FITSDownloadError."""
-    from ztforce.exceptions import FITSDownloadError
-    from ztforce.ztf_images import iter_sci_images
-
-    row = _make_row(obsjd=2459000.0)
-    df = pd.DataFrame([row])
-
-    with (
-        mock.patch("ztforce.ztf_images.query_sci_metadata", return_value=df),
-        mock.patch("ztforce.ztf_images.build_sci_url", return_value="http://fake"),
-        mock.patch("ztforce.ztf_images.download_fits", side_effect=FITSDownloadError("fail")),
-    ):
-        results = list(iter_sci_images(_RA, _DEC, "g", cache, mock_config))
-
-    assert results == []

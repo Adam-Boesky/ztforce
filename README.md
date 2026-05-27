@@ -72,6 +72,18 @@ results = run_forced_photometry_batch(targets, bands=["g", "r"], n_workers=4)
 results[0]["g"].stack()  # stacked photometry for first target, g-band
 ```
 
+## Related services
+
+Several official ZTF services offer complementary photometry — ztforce fills a gap none of them cover:
+
+| Service | What it does | Why you'd use ztforce instead |
+|---|---|---|
+| [ZTF Forced Photometry Service (ZFPS)](https://irsa.ipac.caltech.edu/data/ZTF/docs/ztf_forced_photometry.pdf) ([Masci et al. 2023](https://arxiv.org/abs/2305.16279)) | Forced PSF photometry on ZTF **difference** images at user positions | Science-image photometry avoids subtraction artifacts; no account/queue required; runs locally |
+| [ZTF DR lightcurves (IRSA)](https://irsa.ipac.caltech.edu/docs/program_interface/ztf_lightcurve_api.html) | Catalog lightcurves for sources detected in ZTF data releases | Forced photometry works for transients and sub-threshold sources not in any catalog and at any arbitrary position |
+| [ZuberCal](https://irsa.ipac.caltech.edu/data/ZTF/zubercal/overview.pdf) | Ubercalibrated PSF photometry catalog for PS1-matched ZTF sources | Only covers sources detected in PS1; ztforce works at any arbitrary position |
+
+**ztforce is designed for cases where the source may not appear in any existing catalog** — supernovae, kilonova, flares, or any transient — and you need calibrated flux measurements at a fixed sky position across every available epoch, including non-detections.
+
 ## Dev Guide - Getting Started
 
 Before installing any dependencies or writing code, it's a great idea to create a

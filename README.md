@@ -48,12 +48,28 @@ config = build_config(irsa_user="your_username", irsa_pass="your_password")
 ```python
 from ztforce import run_forced_photometry
 
-# Measure flux at a fixed position across all ZTF g- and r-band epochs
+# Measure flux at a fixed position across all ZTF g- and r-band epochs.
+# A tqdm progress bar tracks downloads and PSF fitting; results are cached
+# on disk so repeated calls return instantly.
 lcs = run_forced_photometry(ra=210.08, dec=-6.88, bands=["g", "r"])
 
-lcs["g"].plot()          # plot the lightcurve
-lcs["g"].stack()         # inverse-variance weighted stack
+lcs["g"].df              # pandas DataFrame of all epochs
+lcs["g"].stack()         # inverse-variance weighted stack of detections
 lcs["g"].save("my_source_g.ecsv")   # save to ECSV
+```
+
+### Batch processing
+
+```python
+from astropy.coordinates import SkyCoord
+from ztforce import run_forced_photometry_batch
+
+targets = SkyCoord(ra=[210.08, 130.13], dec=[-6.88, 19.70], unit="deg")
+
+# Processes targets in parallel; downloads are shared across all workers.
+results = run_forced_photometry_batch(targets, bands=["g", "r"], n_workers=4)
+
+results[0]["g"].stack()  # stacked photometry for first target, g-band
 ```
 
 ## Dev Guide - Getting Started

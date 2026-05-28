@@ -24,6 +24,11 @@
       "identifier": "https://github.com/Adam-Boesky/ztforce",
       "relation": "isSupplementTo",
       "scheme": "url"
+    },
+    {
+      "identifier": "https://ztforce.readthedocs.io",
+      "relation": "isDocumentedBy",
+      "scheme": "url"
     }
   ],
   "access_right": "open"

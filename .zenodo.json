@@ -1,0 +1,30 @@
+{
+  "upload_type": "software",
+  "title": "ztforce: Forced PSF photometry on ZTF science images",
+  "description": "Forced PSF photometry on ZTF science images — measures flux at a fixed sky position in every available epoch, even below the detection threshold, producing a calibrated AB-magnitude lightcurve.",
+  "creators": [
+    {
+      "name": "Boesky, Adam",
+      "affiliation": "Harvard University",
+      "orcid": "0009-0005-9830-9966"
+    }
+  ],
+  "license": "MIT",
+  "keywords": [
+    "astronomy",
+    "astrophysics",
+    "ZTF",
+    "photometry",
+    "forced photometry",
+    "lightcurve",
+    "python"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/Adam-Boesky/ztforce",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ],
+  "access_right": "open"
+}

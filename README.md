@@ -13,6 +13,7 @@ Forced PSF photometry on ZTF science images — measures flux at a fixed sky pos
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/Adam-Boesky/ztforce/smoke-test.yml)](https://github.com/Adam-Boesky/ztforce/actions/workflows/smoke-test.yml)
 [![Codecov](https://codecov.io/gh/Adam-Boesky/ztforce/branch/main/graph/badge.svg)](https://codecov.io/gh/Adam-Boesky/ztforce)
 [![Read The Docs](https://img.shields.io/readthedocs/ztforce)](https://ztforce.readthedocs.io/)
+[![DOI](https://zenodo.org/badge/1249800788.svg)](https://zenodo.org/badge/latestdoi/1249800788)
 
 ## Installation
 

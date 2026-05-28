@@ -89,6 +89,23 @@ Several official ZTF services offer complementary photometry — ztforce fills a
 
 **ztforce is designed for cases where the source may not appear in any existing catalog** — supernovae, kilonova, flares, or any transient — and you need calibrated flux measurements at a fixed sky position across every available epoch, including non-detections.
 
+## Citation
+
+If you find ztforce useful for your work, please cite the Zenodo release:
+
+```
+@software{Boesky2026_ztforce,
+  author       = {Adam Boesky},
+  title        = {Adam-Boesky/ztforce: v0.1.2},
+  month        = may,
+  year         = 2026,
+  publisher    = {Zenodo},
+  version      = {v0.1.2},
+  doi          = {10.5281/zenodo.20434975},
+  url          = {https://doi.org/10.5281/zenodo.20434975},
+}
+```
+
 ## Dev Guide - Getting Started
 
 Before installing any dependencies or writing code, it's a great idea to create a

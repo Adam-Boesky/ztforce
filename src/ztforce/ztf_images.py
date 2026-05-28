@@ -12,10 +12,12 @@ from astropy.io import fits
 from ztfquery import buildurl
 from ztfquery import query as zquery
 
+from ._constants import DEFAULT_CUTOUT_SIZE_ARCMIN
 from .config import ZTForceConfig
 from .exceptions import FITSDownloadError, NoImagesFoundError
 
 _IRSA_BASE = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products"
+_DOWNLOAD_TIMEOUT_SEC = 120
 
 _BAND_TO_FILTERCODE = {"g": "zg", "r": "zr", "i": "zi"}
 _REQUIRED_METADATA_COLS = {"obsjd", "field", "ccdid", "qid", "filtercode", "filefracday"}
@@ -74,7 +76,7 @@ def build_sci_url(
     ra: float,
     dec: float,
     suffix: str = "sciimg.fits",
-    cutout_size_arcmin: float = 15.0,
+    cutout_size_arcmin: float = DEFAULT_CUTOUT_SIZE_ARCMIN,
 ) -> str:
     """Construct the IRSA IBE URL for a science image product.
 
@@ -130,7 +132,7 @@ def _download_with_retry(
                 url,
                 auth=(config.irsa_user, config.irsa_pass),
                 stream=True,
-                timeout=120,
+                timeout=_DOWNLOAD_TIMEOUT_SEC,
             )
             resp.raise_for_status()
             dest.write_bytes(resp.content)

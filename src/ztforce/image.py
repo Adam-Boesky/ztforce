@@ -12,6 +12,9 @@ from astropy.wcs import WCS, FITSFixedWarning
 from .config import ZTForceConfig
 from .exceptions import WCSError
 
+# e-/ADU per coadded frame for ZTF deep stacks (Bellm et al. 2019, PASP, 131, 018002)
+_ZTF_GAIN_PER_FRAME = 5.8
+
 
 class ZTFImage:
     """Lazy-loading wrapper around a single ZTF science FITS image."""
@@ -42,17 +45,16 @@ class ZTFImage:
         return self._data  # type: ignore[return-value]
 
     def _load_fits(self) -> None:
-        hdul = fits.open(self._fpath)
-        hdr = hdul[0].header
-        # Astropy WCS requires RADESYS; older ZTF headers use RADECSYS
-        if "RADECSYS" in hdr and "RADESYS" not in hdr:
-            hdr.rename_keyword("RADECSYS", "RADESYS")
-        elif "RADECSYS" in hdr:
-            del hdr["RADECSYS"]
-        self._header = hdr
-        raw = hdul[0].data
-        self._data = np.ascontiguousarray(raw, dtype=np.float64)
-        hdul.close()
+        with fits.open(self._fpath) as hdul:
+            hdr = hdul[0].header
+            # Astropy WCS requires RADESYS; older ZTF headers use RADECSYS
+            if "RADECSYS" in hdr and "RADESYS" not in hdr:
+                hdr.rename_keyword("RADECSYS", "RADESYS")
+            elif "RADECSYS" in hdr:
+                del hdr["RADECSYS"]
+            self._header = hdr
+            raw = hdul[0].data
+            self._data = np.ascontiguousarray(raw, dtype=np.float64)
 
     @property
     def cutout_origin(self) -> tuple[float, float]:
@@ -75,7 +77,7 @@ class ZTFImage:
         if "GAIN" in hdr:
             return float(hdr["GAIN"])
         if "NFRAMES" in hdr:
-            return 5.8 * float(hdr["NFRAMES"])
+            return _ZTF_GAIN_PER_FRAME * float(hdr["NFRAMES"])
         return self._config.default_gain
 
     @property
@@ -88,7 +90,11 @@ class ZTFImage:
 
     @property
     def zero_point(self) -> float:
-        """AB photometric zero-point from header (MAGZP)."""
+        """AB photometric zero-point from header (MAGZP).
+
+        Calibrated against PanSTARRS DR1 by the ZTF pipeline
+        (Masci et al. 2019, PASP, 131, 018003).
+        """
         return float(self.header["MAGZP"])
 
     @property

@@ -10,11 +10,18 @@ from astropy.coordinates import SkyCoord
 
 from .exceptions import PSFBuildError, WCSError
 from .image import ZTFImage
-from .utils import annular_background, has_nan_nearby
+from .utils import annular_background, flux_to_ab_mag, has_nan_nearby
+
+# Annular sky background: inner/outer radius as multiples of the PSF FWHM
+_SKY_ANNULUS_INNER_FWHM = 2.0
+_SKY_ANNULUS_OUTER_FWHM = 4.0
 
 
 def parse_daophot_psf(psf_fpath: str | Path) -> dict:
     """Parse a ZTF DAOPhot PSF sidecar file (sciimgdao.psf).
+
+    The file format follows the DAOPHOT convention (Stetson 1987, PASP, 99, 191):
+    a Gaussian analytic base plus spatially-varying lookup-table residuals.
 
     Returns a dict with keys ``psf_type``, ``psf_size``, ``n_tables``,
     ``norm_factor``, ``x_cen``, ``y_cen``, ``sigmas``, ``tables``.
@@ -97,7 +104,7 @@ def reconstruct_psf(parsed: dict, x_target: float, y_target: float) -> np.ndarra
 def _poly_weights(dx: float, dy: float, n: int) -> list[float]:
     """Return polynomial basis weights for n lookup tables.
 
-    Conventions:
+    Follows the DAOPHOT spatial-variation convention (Stetson 1987, PASP, 99, 191):
       n=1: [1]
       n=3: [1, dx, dy]
       n=6: [1, dx, dy, dx^2, dx*dy, dy^2]
@@ -121,14 +128,13 @@ def forced_phot_at_position(
     """Measure forced PSF photometry at a fixed sky position.
 
     Only the amplitude is free; position is locked.  Uses the optimal
-    matched-filter estimator: ``flux = Σ(data·psf/σ²) / Σ(psf²/σ²)``.
+    matched-filter estimator (Naylor 1998, MNRAS, 296, 339):
+    ``flux = Σ(data·psf/σ²) / Σ(psf²/σ²)``.
 
     Returns a dict with keys ``flux``, ``flux_err``, ``mag``, ``mag_err``,
     ``flags``, ``x_fit``, ``y_fit``.  ``flags=1`` means the position was too
     close to the image edge or a NaN region.
     """
-    from .utils import flux_to_ab_mag
-
     nan_result = dict(
         flux=float("nan"),
         flux_err=float("nan"),
@@ -162,7 +168,11 @@ def forced_phot_at_position(
     # Extract raw cutout; estimate and subtract local sky from an annulus
     raw_cutout = image.data[yi - half : yi + half + 1, xi - half : xi + half + 1].copy()
     sky_level, sky_rms = annular_background(
-        raw_cutout, float(half), float(half), 2.0 * image.fwhm, 4.0 * image.fwhm
+        raw_cutout,
+        float(half),
+        float(half),
+        _SKY_ANNULUS_INNER_FWHM * image.fwhm,
+        _SKY_ANNULUS_OUTER_FWHM * image.fwhm,
     )
     cutout = raw_cutout - sky_level
 

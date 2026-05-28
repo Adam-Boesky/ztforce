@@ -12,6 +12,9 @@ def flux_to_ab_mag(
 ) -> tuple[float, float | None]:
     """Convert instrumental flux to AB magnitude.
 
+    Uses the AB system definition from Oke & Gunn (1983, ApJ, 266, 713):
+    ``mag = zero_point - 2.5 * log10(flux)``.
+
     Returns (mag, mag_err). mag_err is None when flux_err is not given.
     Returns (nan, nan) when flux <= 0.
     """

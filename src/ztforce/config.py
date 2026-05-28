@@ -7,6 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._constants import DEFAULT_CUTOUT_SIZE_ARCMIN
 from .exceptions import ConfigError
 
 # Environment variable names for credentials
@@ -26,7 +27,7 @@ class ZTForceConfig:
     irsa_pass: str = ""
 
     # IRSA IBE cutout size for science image downloads
-    cutout_size_arcmin: float = 2.0
+    cutout_size_arcmin: float = DEFAULT_CUTOUT_SIZE_ARCMIN
 
     # Retry / download
     max_retries: int = 3

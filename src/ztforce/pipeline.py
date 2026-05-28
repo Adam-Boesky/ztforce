@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -229,7 +230,7 @@ def run_forced_photometry(
             # Assemble lightcurve
             lc = Lightcurve(ra=ra, dec=dec)
             for res in results:
-                if not res.get("obsjd") or (res.get("obsjd") != res.get("obsjd")):
+                if not res.get("obsjd") or math.isnan(res.get("obsjd", float("nan"))):
                     continue
                 lc.add_epoch(
                     obsjd=res["obsjd"],
@@ -334,7 +335,7 @@ def run_forced_photometry_batch(
                 _release_position(pos)
                 main_bar.update(1)
 
-        results: list[dict[str, Lightcurve]] = [{}] * len(targets)
+        results: list[dict[str, Lightcurve]] = [{} for _ in range(len(targets))]
         with ThreadPoolExecutor(max_workers=n_workers) as src_exec:
             future_to_idx = {src_exec.submit(_run_one, coord): i for i, coord in enumerate(targets)}
             for future in as_completed(future_to_idx):

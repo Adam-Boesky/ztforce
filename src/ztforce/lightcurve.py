@@ -1,4 +1,4 @@
-"""Lightcurve: per-epoch storage, stacking, plotting, I/O."""
+"""Lightcurve: per-epoch storage, stacking, and I/O."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ import numpy as np
 import pandas as pd
 from astropy.table import Table
 
+from .utils import flux_to_ab_mag
+
 _BAND_ORDER = ["g", "r", "i"]
 SNT = 3.0  # detection signal-to-noise threshold
-SNU = 5.0  # sigma multiplier for upper-limit arrows
 
 
 class Lightcurve:
@@ -92,8 +93,6 @@ class Lightcurve:
         Returns a DataFrame indexed by band with columns:
           flux_stack, flux_err_stack, mag_stack, mag_err_stack, n_epochs.
         """
-        from .utils import flux_to_ab_mag
-
         df = self.df
         if jd_min is not None:
             df = df[df["obsjd"] >= jd_min]

@@ -59,7 +59,7 @@ from ztforce import run_forced_photometry
 lcs = run_forced_photometry(ra=210.08, dec=-6.88, bands=["g", "r"])
 
 lcs["g"].df              # pandas DataFrame of all epochs
-lcs["g"].stack()         # inverse-variance weighted stack of detections
+lcs["g"].stack()         # inverse-variance weighted stack of all good epochs
 lcs["g"].save("my_source_g.ecsv")   # save to ECSV
 ```
 
@@ -76,6 +76,12 @@ results = run_forced_photometry_batch(targets, bands=["g", "r"], n_workers=4)
 
 results[0]["g"].stack()  # stacked photometry for first target, g-band
 ```
+
+### Quality cuts, stacking, and uncertainties
+
+Epochs failing the [ZFPS](https://irsa.ipac.caltech.edu/data/ZTF/docs/ztf_zfps_userguide.pdf) quality cuts (bad calibration, noisy image, seeing > 4″) are flagged and never counted as detections or stacked. Stacks follow the ZFPS recipe: all good epochs, rescaled to a common zero point, inverse-variance averaged, and reported as a 5σ upper limit below S/N 3.
+
+**Uncertainties are statistical only and so underestimated**, especially for bright sources (calibration/PSF systematics) and sources on extended hosts (the fit is on science images, not difference images).
 
 ## Related services
 

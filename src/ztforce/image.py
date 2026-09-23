@@ -103,6 +103,28 @@ class ZTFImage:
         return float(self.header["OBSJD"])
 
     @property
+    def infobits(self) -> int:
+        """Processing/calibration status bits from the header (INFOBITS); 0 if absent."""
+        return int(self.header.get("INFOBITS", 0))
+
+    @property
+    def seeing_arcsec(self) -> float:
+        """Seeing FWHM in arcsec.  The header SEEING keyword is in pixels."""
+        hdr = self.header
+        if "SEEING" not in hdr or "PIXSCALE" not in hdr:
+            return float("nan")
+        return float(hdr["SEEING"]) * float(hdr["PIXSCALE"])
+
+    @property
+    def scisigpix(self) -> float:
+        """Robust per-pixel noise of the image in DN: 0.5 * (84th - 16th percentile).
+
+        The ZFPS definition, computed here over the downloaded cutout.
+        """
+        p16, p84 = np.nanpercentile(self.data, [16, 84])
+        return float(0.5 * (p84 - p16))
+
+    @property
     def mag_limit(self) -> float | None:
         """5-sigma limiting magnitude from header, if present."""
         v = self.header.get("MAGLIM")

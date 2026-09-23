@@ -16,7 +16,16 @@ import pandas as pd
 from astropy.coordinates import SkyCoord
 from tqdm.auto import tqdm
 
-from ._constants import _PHOTOMETRY_VERSION
+from ._constants import (
+    _PHOTOMETRY_VERSION,
+    BAD_CALIBRATION_INFOBITS,
+    FLAG_BAD_CALIBRATION,
+    FLAG_BAD_SEEING,
+    FLAG_NOISY_IMAGE,
+    FLAG_PROCESSING_ERROR,
+    MAX_SCISIGPIX_DN,
+    MAX_SEEING_ARCSEC,
+)
 from .cache import lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError
@@ -85,13 +94,18 @@ def _process_one_epoch(
         result["mag_limit"] = img.mag_limit
         result["image_id"] = image_id
         result["band"] = band
+        result["infobits"] = img.infobits
+        result["seeing"] = img.seeing_arcsec
+        result["scisigpix"] = img.scisigpix
+        result["flags"] |= _quality_flags(result)
     except Exception:
         result = dict(
             flux=float("nan"),
             flux_err=float("nan"),
             mag=float("nan"),
             mag_err=float("nan"),
-            flags=2,
+            chisq=float("nan"),
+            flags=FLAG_PROCESSING_ERROR,
             x_fit=float("nan"),
             y_fit=float("nan"),
             obsjd=float("nan"),
@@ -102,6 +116,18 @@ def _process_one_epoch(
         )
         traceback.print_exc()
     return result
+
+
+def _quality_flags(result: dict) -> int:
+    """Quality-cut bits for one epoch, per the ZFPS user guide section 6.1."""
+    flags = 0
+    if result["infobits"] >= BAD_CALIBRATION_INFOBITS:
+        flags |= FLAG_BAD_CALIBRATION
+    if result["scisigpix"] > MAX_SCISIGPIX_DN:
+        flags |= FLAG_NOISY_IMAGE
+    if result["seeing"] > MAX_SEEING_ARCSEC:
+        flags |= FLAG_BAD_SEEING
+    return flags
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -256,6 +282,10 @@ def run_forced_photometry(
                         y_fit=res.get("y_fit"),
                         mag_limit=res.get("mag_limit"),
                         image_id=res.get("image_id"),
+                        chisq=res.get("chisq"),
+                        infobits=res.get("infobits"),
+                        seeing=res.get("seeing"),
+                        scisigpix=res.get("scisigpix"),
                     )
 
                 lc.cache_key = ck

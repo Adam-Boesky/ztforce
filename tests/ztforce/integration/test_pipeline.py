@@ -147,6 +147,48 @@ def test_process_one_epoch_bad_fits_returns_flags2(tmp_path, mock_config):
     assert result["flags"] == 2
 
 
+# ── quality flags / uncertainty rescaling ─────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("infobits", "scisigpix", "seeing", "expected"),
+    [
+        (0, 10.0, 2.0, 0),
+        (2**25, 10.0, 2.0, 4),
+        (2**25 + 1, 10.0, 2.0, 4),
+        (2**25 - 1, 10.0, 2.0, 0),  # lower bits alone are not fatal
+        (0, 30.0, 2.0, 8),
+        (0, 10.0, 4.5, 16),
+        (2**26, 30.0, 4.5, 28),
+    ],
+)
+def test_quality_flags(infobits, scisigpix, seeing, expected):
+    """ZFPS section 6.1 cuts map onto their flag bits."""
+    from ztforce.pipeline import _quality_flags
+
+    assert _quality_flags(dict(infobits=infobits, scisigpix=scisigpix, seeing=seeing)) == expected
+
+
+def test_process_one_epoch_records_quality_metrics(tmp_path, mock_config):
+    """_process_one_epoch stores chisq, infobits, seeing and scisigpix, and flags bad calibration."""
+    from ztforce.pipeline import _process_one_epoch
+
+    fits_path = tmp_path / "img.fits"
+    psf_path = tmp_path / "img.psf"
+    _write_synthetic_fits(fits_path)
+    with fits.open(fits_path, mode="update") as hdul:
+        hdul[0].header.update(INFOBITS=2**25, SEEING=2.0, PIXSCALE=1.01)
+    _write_synthetic_psf(psf_path)
+
+    result = _process_one_epoch(str(fits_path), str(psf_path), 150.0, 2.0, "g", "id", mock_config)
+
+    assert np.isfinite(result["chisq"]) and result["chisq"] > 0
+    assert result["infobits"] == 2**25
+    assert result["seeing"] == pytest.approx(2.02)
+    assert result["scisigpix"] == pytest.approx(10.0, rel=0.2)  # synthetic sky sigma is 10 DN
+    assert result["flags"] & 4
+
+
 # ── run_forced_photometry (empty downloads) ───────────────────────────────────
 
 

@@ -132,7 +132,8 @@ def forced_phot_at_position(
     ``flux = Σ(data·psf/σ²) / Σ(psf²/σ²)``.
 
     Returns a dict with keys ``flux``, ``flux_err``, ``mag``, ``mag_err``,
-    ``flags``, ``x_fit``, ``y_fit``.  ``flags=1`` means the position was too
+    ``chisq``, ``flags``, ``x_fit``, ``y_fit``.  ``chisq`` is the reduced chi-squared
+    of the fit over the PSF footprint.  ``flags=1`` means the position was too
     close to the image edge or a NaN region.
     """
     nan_result = dict(
@@ -140,6 +141,7 @@ def forced_phot_at_position(
         flux_err=float("nan"),
         mag=float("nan"),
         mag_err=float("nan"),
+        chisq=float("nan"),
         flags=1,
         x_fit=float("nan"),
         y_fit=float("nan"),
@@ -194,6 +196,8 @@ def forced_phot_at_position(
     flux_var = 1.0 / denom
     flux_err = float(np.sqrt(flux_var))
     flux = float(flux)
+    # Reduced chi-squared of the amplitude-only fit (one free parameter).
+    chisq = float((((cutout - flux * psf_stamp) ** 2) / noise_var).sum() / (cutout.size - 1))
 
     mag, mag_err = flux_to_ab_mag(flux, image.zero_point, flux_err)
 
@@ -202,6 +206,7 @@ def forced_phot_at_position(
         flux_err=flux_err,
         mag=float(mag) if mag is not None else float("nan"),
         mag_err=float(mag_err) if mag_err is not None else float("nan"),
+        chisq=chisq,
         flags=0,
         x_fit=x0,
         y_fit=y0,

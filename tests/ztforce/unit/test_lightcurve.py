@@ -241,6 +241,75 @@ def test_rolling_stack_bad_unit_raises():
         lc.rolling_stack(window=10.0, window_unit="weeks")
 
 
+def test_rolling_stack_images_unit_returns_expected_columns():
+    """rolling_stack with window_unit='images' returns expected columns."""
+    lc = _make_lc()
+    for i in range(20):
+        _add_detection(lc, obsjd=2459000.0 + i * 3, flux=1000.0, flux_err=100.0)
+    result = lc.rolling_stack(window=6, window_unit="images")
+    assert not result.empty
+    for col in (
+        "obsjd_center",
+        "band",
+        "flux_stack",
+        "flux_err_stack",
+        "mag_stack",
+        "mag_err_stack",
+        "n_epochs",
+    ):
+        assert col in result.columns
+
+
+def test_rolling_stack_images_ivw_analytic():
+    """Image-windowed rolling_stack IVW matches hand-computed Σ(f/σ²)/Σ(1/σ²)."""
+    lc = _make_lc()
+    fluxes = [800.0, 1200.0, 1000.0, 900.0, 1100.0]
+    errors = [50.0, 100.0, 80.0, 60.0, 90.0]
+    for i, (f, e) in enumerate(zip(fluxes, errors, strict=True)):
+        _add_detection(lc, obsjd=2459000.0 + i, flux=f, flux_err=e)
+
+    # window=3, step=1 → centre index 1 covers indices 0,1,2
+    result = lc.rolling_stack(window=3, window_unit="images", step=1)
+    first = result[result["band"] == "g"].sort_values("obsjd_center").iloc[0]
+
+    inv_var = [1 / e**2 for e in errors[:3]]
+    expected_flux = sum(f * iv for f, iv in zip(fluxes[:3], inv_var, strict=True)) / sum(inv_var)
+    expected_err = 1.0 / np.sqrt(sum(inv_var))
+
+    assert first["flux_stack"] == pytest.approx(expected_flux, rel=1e-6)
+    assert first["flux_err_stack"] == pytest.approx(expected_err, rel=1e-6)
+
+
+def test_rolling_stack_obsjd_center_is_ivw_weighted_mean():
+    """obsjd_center is the IVW-weighted mean JD of the window, not the arithmetic midpoint."""
+    lc = _make_lc()
+    # Three epochs; first has 100× lower error than the others → dominates the centre.
+    _add_detection(lc, obsjd=2459000.0, flux=1000.0, flux_err=10.0)  # weight = 1/100
+    _add_detection(lc, obsjd=2459010.0, flux=1000.0, flux_err=1000.0)  # weight = 1/1e6
+    _add_detection(lc, obsjd=2459020.0, flux=1000.0, flux_err=1000.0)  # weight = 1/1e6
+
+    # window=3, half=1 → range(1, 2, 1): one window covering all three epochs
+    result = lc.rolling_stack(window=3, window_unit="images", step=1)
+    row = result[result["band"] == "g"].iloc[0]
+
+    jds = [2459000.0, 2459010.0, 2459020.0]
+    errs = [10.0, 1000.0, 1000.0]
+    inv_var = [1 / e**2 for e in errs]
+    expected_center = sum(jd * iv for jd, iv in zip(jds, inv_var, strict=True)) / sum(inv_var)
+
+    assert row["obsjd_center"] == pytest.approx(expected_center, rel=1e-6)
+    # IVW centre should be near 2459000, not the arithmetic midpoint 2459010.
+    assert abs(row["obsjd_center"] - 2459000.0) < 1.0
+
+
+def test_stack_has_no_obsjd_center_column():
+    """stack() output does not include obsjd_center (it belongs only to rolling_stack)."""
+    lc = _make_lc()
+    _add_detection(lc)
+    result = lc.stack()
+    assert "obsjd_center" not in result.columns
+
+
 # ── save / load round-trip ────────────────────────────────────────────────────
 
 

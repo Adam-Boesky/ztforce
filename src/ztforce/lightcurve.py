@@ -103,25 +103,33 @@ class Lightcurve:
         records = []
         for band in target_bands:
             sub = df[(df["band"] == band) & df["detection"]]
-            sub = sub[np.isfinite(sub["flux"]) & (sub["flux_err"] > 0)]
             if sub.empty:
                 continue
-            inv_var = 1.0 / sub["flux_err"] ** 2
-            f_stack = (sub["flux"] * inv_var).sum() / inv_var.sum()
-            e_stack = 1.0 / np.sqrt(inv_var.sum())
-            zp = sub["zero_point"].median()
-            mag, merr = flux_to_ab_mag(float(f_stack), float(zp), float(e_stack))
-            records.append(
-                dict(
-                    band=band,
-                    flux_stack=float(f_stack),
-                    flux_err_stack=float(e_stack),
-                    mag_stack=float(mag) if mag is not None else float("nan"),
-                    mag_err_stack=float(merr) if merr is not None else float("nan"),
-                    n_epochs=len(sub),
-                )
-            )
-        return pd.DataFrame(records).set_index("band")
+            rec = self._stack_window(band, sub)
+            if rec is not None:
+                records.append(rec)
+        return pd.DataFrame(records).set_index("band").drop(columns="obsjd_center")
+
+    def _stack_window(self, band: str, sub: pd.DataFrame) -> dict | None:
+        """IVW stack for one window of epochs; returns None when no valid rows."""
+        valid = sub[np.isfinite(sub["flux"]) & (sub["flux_err"] > 0)]
+        if valid.empty:
+            return None
+        inv_var = 1.0 / valid["flux_err"] ** 2
+        f_stack = float((valid["flux"] * inv_var).sum() / inv_var.sum())
+        e_stack = float(1.0 / np.sqrt(inv_var.sum()))
+        jd_c = float((valid["obsjd"] * inv_var).sum() / inv_var.sum())
+        zp = float(valid["zero_point"].median())
+        mag, merr = flux_to_ab_mag(f_stack, zp, e_stack)
+        return dict(
+            obsjd_center=jd_c,
+            band=band,
+            flux_stack=f_stack,
+            flux_err_stack=e_stack,
+            mag_stack=float(mag),
+            mag_err_stack=float(merr) if merr is not None else float("nan"),
+            n_epochs=len(valid),
+        )
 
     def rolling_stack(
         self,
@@ -132,28 +140,57 @@ class Lightcurve:
     ) -> pd.DataFrame:
         """Rolling IVW stack in a sliding window.
 
-        Returns a long-format DataFrame with columns:
-          obsjd_center, band, flux_stack, flux_err_stack, mag_stack, mag_err_stack, n_epochs.
-        """
-        df = self.df
-        if window_unit == "days":
-            win = window
-        elif window_unit == "years":
-            win = window * 365.25
-        else:
-            raise ValueError(f"Unknown window_unit '{window_unit}'. Use 'days' or 'years'.")
+        Args:
+            window: Width of the rolling window in the units given by ``window_unit``.
+            window_unit: ``'days'`` or ``'years'`` for time-based windows;
+                ``'images'`` for a fixed epoch count regardless of cadence.
+            bands: Bands to include (default: all present).
+            step: Step between window centres in the same unit as ``window``.
+                Defaults to ``window / 2`` (50 % overlap).
 
-        step = step or (win / 2)
+        Returns:
+            Long-format DataFrame with columns:
+            obsjd_center, band, flux_stack, flux_err_stack, mag_stack, mag_err_stack, n_epochs.
+        """
         target_bands = bands or self.bands
-        jd_min = df["obsjd"].min()
-        jd_max = df["obsjd"].max()
-        centers = np.arange(jd_min + win / 2, jd_max, step)
+        if window_unit == "days":
+            win_days = window
+        elif window_unit == "years":
+            win_days = window * 365.25
+        elif window_unit == "images":
+            return self._rolling_stack_images(
+                int(window), target_bands, int(step) if step is not None else None
+            )
+        else:
+            raise ValueError(f"Unknown window_unit '{window_unit}'. Use 'days', 'years', or 'images'.")
+        return self._rolling_stack_time(win_days, target_bands, step)
+
+    def _rolling_stack_time(self, window_days: float, bands: list[str], step: float | None) -> pd.DataFrame:
+        step = step or (window_days / 2)
+        df = self.df
+        centers = np.arange(df["obsjd"].min() + window_days / 2, df["obsjd"].max(), step)
 
         records = []
         for jd_c in centers:
-            sub = self.stack(jd_min=jd_c - win / 2, jd_max=jd_c + win / 2, bands=target_bands)
-            for band, row in sub.iterrows():
-                records.append({"obsjd_center": jd_c, "band": band, **row.to_dict()})
+            sub = df[(df["obsjd"] >= jd_c - window_days / 2) & (df["obsjd"] <= jd_c + window_days / 2)]
+            for band in bands:
+                rec = self._stack_window(band, sub[sub["band"] == band])
+                if rec is not None:
+                    records.append(rec)
+        return pd.DataFrame(records)
+
+    def _rolling_stack_images(self, window: int, bands: list[str], step: int | None) -> pd.DataFrame:
+        step = step or max(1, window // 2)
+        half = window // 2
+        df = self.df
+
+        records = []
+        for band in bands:
+            lc = df[df["band"] == band].sort_values("obsjd").reset_index(drop=True)
+            for i in range(half, len(lc) - half, step):
+                rec = self._stack_window(band, lc.iloc[i - half : i + half + 1])
+                if rec is not None:
+                    records.append(rec)
         return pd.DataFrame(records)
 
     # ── Persistence ──────────────────────────────────────────────────────────
@@ -172,9 +209,7 @@ class Lightcurve:
         t = Table.read(str(path), format="ascii.ecsv")
         lc = cls(ra=float(t.meta["ra"]), dec=float(t.meta["dec"]))
         lc.cache_key = t.meta.get("cache_key", "")
-        df = t.to_pandas()
-        for _, row in df.iterrows():
-            lc._rows.append(row.to_dict())
+        lc._rows = t.to_pandas().to_dict("records")
         return lc
 
     # ── Dunder ────────────────────────────────────────────────────────────────

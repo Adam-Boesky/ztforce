@@ -14,6 +14,11 @@ def _make_lc(ra=150.0, dec=2.0):
     return Lightcurve(ra=ra, dec=dec)
 
 
+# Test epochs default to zero point 26.3; stacked fluxes come back on STACK_ZERO_POINT.
+_ZP = 26.3
+_K = 10 ** (-0.4 * (_ZP - 25.0))
+
+
 def _add_detection(lc, obsjd=2459000.0, band="g", flux=1000.0, flux_err=50.0, zp=26.3):
     """Add a clearly detected epoch (SNR = 20 by default)."""
     from ztforce.utils import flux_to_ab_mag
@@ -147,8 +152,8 @@ def test_stack_single_detection():
     _add_detection(lc, flux=1000.0, flux_err=100.0)
     result = lc.stack()
     assert "g" in result.index
-    assert result.loc["g", "flux_stack"] == pytest.approx(1000.0)
-    assert result.loc["g", "flux_err_stack"] == pytest.approx(100.0)
+    assert result.loc["g", "flux_stack"] == pytest.approx(1000.0 * _K)
+    assert result.loc["g", "flux_err_stack"] == pytest.approx(100.0 * _K)
 
 
 def test_stack_ivw_two_detections():
@@ -158,9 +163,9 @@ def test_stack_ivw_two_detections():
     _add_detection(lc, obsjd=2459001.0, flux=2000.0, flux_err=100.0)
     result = lc.stack()
     # IVW with equal errors → arithmetic mean
-    assert result.loc["g", "flux_stack"] == pytest.approx(1500.0, rel=1e-6)
+    assert result.loc["g", "flux_stack"] == pytest.approx(1500.0 * _K, rel=1e-6)
     # Error = 1/sqrt(2) * 100
-    assert result.loc["g", "flux_err_stack"] == pytest.approx(100.0 / np.sqrt(2), rel=1e-6)
+    assert result.loc["g", "flux_err_stack"] == pytest.approx((100.0 / np.sqrt(2)) * _K, rel=1e-6)
 
 
 def test_stack_ivw_analytic():
@@ -176,8 +181,8 @@ def test_stack_ivw_analytic():
     expected_err = 1.0 / np.sqrt(sum(inv_var))
 
     result = lc.stack()
-    assert result.loc["g", "flux_stack"] == pytest.approx(expected_flux, rel=1e-6)
-    assert result.loc["g", "flux_err_stack"] == pytest.approx(expected_err, rel=1e-6)
+    assert result.loc["g", "flux_stack"] == pytest.approx(expected_flux * _K, rel=1e-6)
+    assert result.loc["g", "flux_err_stack"] == pytest.approx(expected_err * _K, rel=1e-6)
 
 
 def test_stack_ignores_non_detections():
@@ -187,7 +192,7 @@ def test_stack_ignores_non_detections():
     _add_non_detection(lc, obsjd=2459001.0, flux=1.0, flux_err=100.0)
     result = lc.stack()
     assert result.loc["g", "n_epochs"] == 1
-    assert result.loc["g", "flux_stack"] == pytest.approx(1000.0)
+    assert result.loc["g", "flux_stack"] == pytest.approx(1000.0 * _K)
 
 
 def test_stack_jd_window():
@@ -197,7 +202,7 @@ def test_stack_jd_window():
     _add_detection(lc, obsjd=2459100.0, flux=1000.0, flux_err=50.0)
     result = lc.stack(jd_min=2459050.0)
     assert result.loc["g", "n_epochs"] == 1
-    assert result.loc["g", "flux_stack"] == pytest.approx(1000.0)
+    assert result.loc["g", "flux_stack"] == pytest.approx(1000.0 * _K)
 
 
 def test_stack_empty_band_omitted():
@@ -276,8 +281,8 @@ def test_rolling_stack_images_ivw_analytic():
     expected_flux = sum(f * iv for f, iv in zip(fluxes[:3], inv_var, strict=True)) / sum(inv_var)
     expected_err = 1.0 / np.sqrt(sum(inv_var))
 
-    assert first["flux_stack"] == pytest.approx(expected_flux, rel=1e-6)
-    assert first["flux_err_stack"] == pytest.approx(expected_err, rel=1e-6)
+    assert first["flux_stack"] == pytest.approx(expected_flux * _K, rel=1e-6)
+    assert first["flux_err_stack"] == pytest.approx(expected_err * _K, rel=1e-6)
 
 
 def test_rolling_stack_obsjd_center_is_ivw_weighted_mean():
@@ -308,6 +313,35 @@ def test_stack_has_no_obsjd_center_column():
     _add_detection(lc)
     result = lc.stack()
     assert "obsjd_center" not in result.columns
+
+
+def test_stack_mixed_zero_points_recovers_true_mag():
+    """Epochs of one constant source taken at different zero points stack to that source's magnitude."""
+    from ztforce.lightcurve import STACK_ZERO_POINT
+
+    lc = _make_lc()
+    true_mag = 18.0
+    # Same source, different transparency: the instrumental flux scales with the zero point.
+    for i, zp in enumerate([26.3, 25.4, 26.1, 25.7]):
+        flux = 10 ** (-0.4 * (true_mag - zp))
+        _add_detection(lc, obsjd=2459000.0 + i, flux=flux, flux_err=flux / 20, zp=zp)
+
+    result = lc.stack()
+    assert result.loc["g", "mag_stack"] == pytest.approx(true_mag, abs=1e-9)
+    assert result.loc["g", "flux_stack"] == pytest.approx(10 ** (-0.4 * (true_mag - STACK_ZERO_POINT)))
+
+
+def test_rolling_stack_mixed_zero_points_is_flat_for_constant_source():
+    """A constant source observed through changing zero points yields a flat rolling stack."""
+    lc = _make_lc()
+    true_mag = 19.0
+    zps = [26.3, 25.4, 26.1, 25.7, 26.2, 25.5, 26.0, 25.8]
+    for i, zp in enumerate(zps):
+        flux = 10 ** (-0.4 * (true_mag - zp))
+        _add_detection(lc, obsjd=2459000.0 + 10 * i, flux=flux, flux_err=flux / 20, zp=zp)
+
+    result = lc.rolling_stack(window=3, window_unit="images", step=1)
+    assert np.allclose(result["mag_stack"], true_mag, atol=1e-9)
 
 
 # ── save / load round-trip ────────────────────────────────────────────────────

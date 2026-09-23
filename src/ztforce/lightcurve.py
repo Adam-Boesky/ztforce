@@ -12,6 +12,10 @@ from .utils import flux_to_ab_mag
 
 _BAND_ORDER = ["g", "r", "i"]
 SNT = 3.0  # detection signal-to-noise threshold
+# Stacked fluxes are expressed on this AB zero point.  Each epoch's instrumental flux
+# is rescaled to it before stacking, since ZTF zero points vary by up to ~1 mag
+# between exposures and averaging raw counts across them biases the stack.
+STACK_ZERO_POINT = 25.0
 
 
 class Lightcurve:
@@ -92,6 +96,7 @@ class Lightcurve:
 
         Returns a DataFrame indexed by band with columns:
           flux_stack, flux_err_stack, mag_stack, mag_err_stack, n_epochs.
+        ``flux_stack`` and ``flux_err_stack`` are on the AB zero point ``STACK_ZERO_POINT``.
         """
         df = self.df
         if jd_min is not None:
@@ -115,12 +120,14 @@ class Lightcurve:
         valid = sub[np.isfinite(sub["flux"]) & (sub["flux_err"] > 0)]
         if valid.empty:
             return None
-        inv_var = 1.0 / valid["flux_err"] ** 2
-        f_stack = float((valid["flux"] * inv_var).sum() / inv_var.sum())
+        # Put every epoch on a common zero point before averaging.
+        scale = 10.0 ** (-0.4 * (valid["zero_point"] - STACK_ZERO_POINT))
+        flux = valid["flux"] * scale
+        inv_var = 1.0 / (valid["flux_err"] * scale) ** 2
+        f_stack = float((flux * inv_var).sum() / inv_var.sum())
         e_stack = float(1.0 / np.sqrt(inv_var.sum()))
         jd_c = float((valid["obsjd"] * inv_var).sum() / inv_var.sum())
-        zp = float(valid["zero_point"].median())
-        mag, merr = flux_to_ab_mag(f_stack, zp, e_stack)
+        mag, merr = flux_to_ab_mag(f_stack, STACK_ZERO_POINT, e_stack)
         return dict(
             obsjd_center=jd_c,
             band=band,
@@ -151,6 +158,7 @@ class Lightcurve:
         Returns:
             Long-format DataFrame with columns:
             obsjd_center, band, flux_stack, flux_err_stack, mag_stack, mag_err_stack, n_epochs.
+            ``flux_stack`` and ``flux_err_stack`` are on the AB zero point ``STACK_ZERO_POINT``.
         """
         target_bands = bands or self.bands
         if window_unit == "days":

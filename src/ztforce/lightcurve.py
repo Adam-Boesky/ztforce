@@ -12,14 +12,26 @@ from .utils import flux_to_ab_mag
 
 _BAND_ORDER = ["g", "r", "i"]
 SNT = 3.0  # detection signal-to-noise threshold
+SNU = 5.0  # signal-to-noise of the upper limit quoted for a non-detection (ZFPS guide section 6.4)
 # Stacked fluxes are expressed on this AB zero point.  Each epoch's instrumental flux
 # is rescaled to it before stacking, since ZTF zero points vary by up to ~1 mag
 # between exposures and averaging raw counts across them biases the stack.
 STACK_ZERO_POINT = 25.0
 
 
+def _nan_if_none(v: float | None) -> float:
+    return float(v) if v is not None else float("nan")
+
+
 class Lightcurve:
-    """Per-source forced-photometry lightcurve in absolute AB magnitudes."""
+    """Per-source forced-photometry lightcurve in absolute AB magnitudes.
+
+    Uncertainties are statistical only (sky + Poisson), so they are underestimated:
+    they omit calibration/PSF systematics (bright sources) and, since the fit is on
+    science images rather than difference images, residual host light that varies
+    with seeing (extended hosts).  ``chisq`` flags poor PSF fits but is not used to
+    rescale errors, as a static host inflates it without adding epoch-to-epoch noise.
+    """
 
     def __init__(self, ra: float, dec: float) -> None:
         self.ra = ra
@@ -43,11 +55,24 @@ class Lightcurve:
         y_fit: float | None = None,
         mag_limit: float | None = None,
         image_id: str | None = None,
+        chisq: float | None = None,
+        infobits: int | None = None,
+        seeing: float | None = None,
+        scisigpix: float | None = None,
     ) -> None:
-        """Append one exposure's measurement."""
+        """Append one exposure's measurement.
+
+        ``flags`` is the quality bitmask (see ``ztforce._constants``); only epochs with
+        ``flags == 0`` can be detections or enter a stack.
+        """
         snr = flux / flux_err if flux_err and flux_err > 0 else float("nan")
         is_det = np.isfinite(snr) and snr >= SNT and flags == 0
-        upper_limit = mag_limit if not is_det and mag_limit is not None else float("nan")
+        # A good non-detection gets an SNU-sigma limit at the target position (ZFPS guide
+        # section 6.4); mag_limit is the image-wide 5-sigma depth, kept alongside.
+        if not is_det and flags == 0 and flux_err and flux_err > 0:
+            upper_limit = float(zero_point - 2.5 * np.log10(SNU * flux_err))
+        else:
+            upper_limit = float("nan")
 
         self._rows.append(
             dict(
@@ -62,9 +87,14 @@ class Lightcurve:
                 snr=snr,
                 detection=is_det,
                 upper_limit=upper_limit,
+                mag_limit=_nan_if_none(mag_limit),
                 x_fit=x_fit if x_fit is not None else float("nan"),
                 y_fit=y_fit if y_fit is not None else float("nan"),
                 image_id=image_id or "",
+                chisq=_nan_if_none(chisq),
+                infobits=infobits if infobits is not None else -1,
+                seeing=_nan_if_none(seeing),
+                scisigpix=_nan_if_none(scisigpix),
             )
         )
 
@@ -92,11 +122,17 @@ class Lightcurve:
         jd_max: float | None = None,
         bands: list[str] | None = None,
     ) -> pd.DataFrame:
-        """Inverse-variance-weighted stack of detections within a JD window.
+        """Inverse-variance-weighted stack of all good epochs within a JD window.
+
+        Follows the ZFPS user guide (section 6.6): every unflagged epoch is stacked,
+        detected or not, after rescaling to a common zero point.
 
         Returns a DataFrame indexed by band with columns:
-          flux_stack, flux_err_stack, mag_stack, mag_err_stack, n_epochs.
+          flux_stack, flux_err_stack, snr_stack, detection, mag_stack, mag_err_stack,
+          upper_limit_stack, n_epochs.
         ``flux_stack`` and ``flux_err_stack`` are on the AB zero point ``STACK_ZERO_POINT``.
+        A stack with ``snr_stack >= SNT`` is a detection with a magnitude; otherwise
+        ``mag_stack`` is NaN and ``upper_limit_stack`` is its SNU-sigma limiting magnitude.
         """
         df = self.df
         if jd_min is not None:
@@ -107,17 +143,14 @@ class Lightcurve:
 
         records = []
         for band in target_bands:
-            sub = df[(df["band"] == band) & df["detection"]]
-            if sub.empty:
-                continue
-            rec = self._stack_window(band, sub)
+            rec = self._stack_window(band, df[df["band"] == band])
             if rec is not None:
                 records.append(rec)
         return pd.DataFrame(records).set_index("band").drop(columns="obsjd_center")
 
     def _stack_window(self, band: str, sub: pd.DataFrame) -> dict | None:
-        """IVW stack for one window of epochs; returns None when no valid rows."""
-        valid = sub[np.isfinite(sub["flux"]) & (sub["flux_err"] > 0)]
+        """IVW stack of the good epochs in one window; None when there are none."""
+        valid = sub[(sub["flags"] == 0) & np.isfinite(sub["flux"]) & (sub["flux_err"] > 0)]
         if valid.empty:
             return None
         # Put every epoch on a common zero point before averaging.
@@ -127,14 +160,24 @@ class Lightcurve:
         f_stack = float((flux * inv_var).sum() / inv_var.sum())
         e_stack = float(1.0 / np.sqrt(inv_var.sum()))
         jd_c = float((valid["obsjd"] * inv_var).sum() / inv_var.sum())
-        mag, merr = flux_to_ab_mag(f_stack, STACK_ZERO_POINT, e_stack)
+        snr = f_stack / e_stack
+        is_det = snr >= SNT
+        if is_det:
+            mag, merr = flux_to_ab_mag(f_stack, STACK_ZERO_POINT, e_stack)
+            upper_limit = float("nan")
+        else:
+            mag = merr = float("nan")
+            upper_limit = STACK_ZERO_POINT - 2.5 * np.log10(SNU * e_stack)
         return dict(
             obsjd_center=jd_c,
             band=band,
             flux_stack=f_stack,
             flux_err_stack=e_stack,
+            snr_stack=snr,
+            detection=is_det,
             mag_stack=float(mag),
             mag_err_stack=float(merr) if merr is not None else float("nan"),
+            upper_limit_stack=float(upper_limit),
             n_epochs=len(valid),
         )
 
@@ -156,9 +199,8 @@ class Lightcurve:
                 Defaults to ``window / 2`` (50 % overlap).
 
         Returns:
-            Long-format DataFrame with columns:
-            obsjd_center, band, flux_stack, flux_err_stack, mag_stack, mag_err_stack, n_epochs.
-            ``flux_stack`` and ``flux_err_stack`` are on the AB zero point ``STACK_ZERO_POINT``.
+            Long-format DataFrame with the columns of :meth:`stack` plus ``obsjd_center``,
+            the inverse-variance-weighted mean JD of the window's epochs.
         """
         target_bands = bands or self.bands
         if window_unit == "days":
@@ -176,11 +218,16 @@ class Lightcurve:
     def _rolling_stack_time(self, window_days: float, bands: list[str], step: float | None) -> pd.DataFrame:
         step = step or (window_days / 2)
         df = self.df
-        centers = np.arange(df["obsjd"].min() + window_days / 2, df["obsjd"].max(), step)
+        # Windows are half-open, [c - half, c + half), so an epoch on a shared edge counts
+        # once; add windows until the last one extends past the newest epoch.
+        half = window_days / 2
+        jd_min, jd_max = df["obsjd"].min(), df["obsjd"].max()
+        n_extra = max(int(np.floor((jd_max - jd_min - window_days) / step)) + 1, 0)
+        centers = jd_min + half + step * np.arange(n_extra + 1)
 
         records = []
         for jd_c in centers:
-            sub = df[(df["obsjd"] >= jd_c - window_days / 2) & (df["obsjd"] <= jd_c + window_days / 2)]
+            sub = df[(df["obsjd"] >= jd_c - half) & (df["obsjd"] < jd_c + half)]
             for band in bands:
                 rec = self._stack_window(band, sub[sub["band"] == band])
                 if rec is not None:

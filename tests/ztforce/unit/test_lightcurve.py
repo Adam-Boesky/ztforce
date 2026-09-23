@@ -86,12 +86,24 @@ def test_flagged_epoch_not_detection():
 
 
 def test_upper_limit_set_for_non_detection():
-    """Non-detection rows have upper_limit equal to the supplied mag_limit."""
+    """A good non-detection gets the SNU-sigma limit at the target; the image depth is kept too."""
+    from ztforce.lightcurve import SNU
+
     lc = _make_lc()
-    _add_non_detection(lc, flux=1.0, flux_err=100.0)
+    _add_non_detection(lc, flux=5.0, flux_err=50.0, zp=26.3)
     row = lc.df.iloc[0]
-    assert not row["detection"]
-    assert row["upper_limit"] == pytest.approx(21.0)
+    assert row["upper_limit"] == pytest.approx(26.3 - 2.5 * np.log10(SNU * 50.0))
+    assert row["mag_limit"] == pytest.approx(21.0)
+
+
+def test_upper_limit_nan_for_flagged_epoch():
+    """A flagged epoch is not a usable non-detection, so it gets no upper limit."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    mag, merr = flux_to_ab_mag(5.0, 26.3, 50.0)
+    lc.add_epoch(2459000.0, "g", 5.0, 50.0, mag, merr, 26.3, flags=4, mag_limit=21.0)
+    assert np.isnan(lc.df.iloc[0]["upper_limit"])
 
 
 def test_upper_limit_nan_for_detection():
@@ -185,14 +197,52 @@ def test_stack_ivw_analytic():
     assert result.loc["g", "flux_err_stack"] == pytest.approx(expected_err * _K, rel=1e-6)
 
 
-def test_stack_ignores_non_detections():
-    """stack() only uses detection rows."""
+def test_stack_includes_non_detections():
+    """stack() uses every good epoch, detected or not (ZFPS guide section 6.6)."""
     lc = _make_lc()
     _add_detection(lc, obsjd=2459000.0, flux=1000.0, flux_err=100.0)
     _add_non_detection(lc, obsjd=2459001.0, flux=1.0, flux_err=100.0)
     result = lc.stack()
+    assert result.loc["g", "n_epochs"] == 2
+    assert result.loc["g", "flux_stack"] == pytest.approx(500.5 * _K)
+
+
+def test_stack_excludes_flagged_epochs():
+    """Epochs with nonzero quality flags never enter a stack."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    _add_detection(lc, obsjd=2459000.0, flux=1000.0, flux_err=100.0)
+    mag, merr = flux_to_ab_mag(9000.0, _ZP, 100.0)
+    lc.add_epoch(2459001.0, "g", 9000.0, 100.0, mag, merr, _ZP, flags=4)  # bad calibration
+    result = lc.stack()
     assert result.loc["g", "n_epochs"] == 1
     assert result.loc["g", "flux_stack"] == pytest.approx(1000.0 * _K)
+
+
+def test_stack_low_snr_gives_upper_limit():
+    """A stack below SNT has no magnitude and an SNU-sigma upper limit instead."""
+    from ztforce.lightcurve import SNU, STACK_ZERO_POINT
+
+    lc = _make_lc()
+    _add_non_detection(lc, obsjd=2459000.0, flux=10.0, flux_err=100.0)
+    row = lc.stack().loc["g"]
+    assert not row["detection"]
+    assert row["snr_stack"] == pytest.approx(0.1)
+    assert np.isnan(row["mag_stack"]) and np.isnan(row["mag_err_stack"])
+    assert row["upper_limit_stack"] == pytest.approx(STACK_ZERO_POINT - 2.5 * np.log10(SNU * 100.0 * _K))
+
+
+def test_stack_of_faint_epochs_can_be_a_detection():
+    """Individually undetected epochs can add up to a detected stack."""
+    lc = _make_lc()
+    for i in range(25):  # S/N 1 each -> S/N 5 stacked
+        _add_non_detection(lc, obsjd=2459000.0 + i, flux=100.0, flux_err=100.0)
+    row = lc.stack().loc["g"]
+    assert not lc.df["detection"].any()
+    assert row["detection"]
+    assert row["snr_stack"] == pytest.approx(5.0)
+    assert np.isnan(row["upper_limit_stack"])
 
 
 def test_stack_jd_window():
@@ -206,10 +256,13 @@ def test_stack_jd_window():
 
 
 def test_stack_empty_band_omitted():
-    """Bands with no detections are not present in stack result."""
+    """Bands with no good epochs are not present in stack result."""
+    from ztforce.utils import flux_to_ab_mag
+
     lc = _make_lc()
     _add_detection(lc, band="g")
-    _add_non_detection(lc, band="r")
+    mag, merr = flux_to_ab_mag(1000.0, _ZP, 50.0)
+    lc.add_epoch(2459001.0, "r", 1000.0, 50.0, mag, merr, _ZP, flags=16)  # bad seeing
     result = lc.stack()
     assert "g" in result.index
     assert "r" not in result.index
@@ -244,6 +297,17 @@ def test_rolling_stack_bad_unit_raises():
     _add_detection(lc)
     with pytest.raises(ValueError, match="window_unit"):
         lc.rolling_stack(window=10.0, window_unit="weeks")
+
+
+@pytest.mark.parametrize("span", [800.0, 1000.0, 1095.0, 1100.0])
+def test_rolling_stack_days_covers_every_epoch_once(span):
+    """Non-overlapping time windows stack every epoch exactly once, including the newest."""
+    lc = _make_lc()
+    jds = np.linspace(2459000.0, 2459000.0 + span, 60)
+    for jd in jds:
+        _add_detection(lc, obsjd=float(jd))
+    result = lc.rolling_stack(window=365.0, window_unit="days", step=365.0)
+    assert result["n_epochs"].sum() == len(jds)
 
 
 def test_rolling_stack_images_unit_returns_expected_columns():

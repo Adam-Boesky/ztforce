@@ -8,7 +8,7 @@ import json
 import math
 import tempfile
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
 
@@ -23,7 +23,7 @@ from .exceptions import NoImagesFoundError
 from .image import ZTFImage
 from .lightcurve import Lightcurve
 from .psf import forced_phot_at_position, parse_daophot_psf
-from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata
+from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata_bands
 
 # ── Cache key ────────────────────────────────────────────────────────────────
 
@@ -156,63 +156,72 @@ def run_forced_photometry(
     ck = _cache_key(config, max_epochs)
     lightcurves: dict[str, Lightcurve] = {}
 
+    # Serve what the cache can; everything else is fetched together below.
+    todo: list[str] = []
+    for band in bands:
+        lc_fpath = lightcurve_path(cache, ra, dec, band)
+        if lc_fpath.exists() and not force_recompute:
+            lc = Lightcurve.load(lc_fpath)
+            if lc.cache_key == ck:
+                if show_progress:
+                    tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
+                lightcurves[band] = lc
+                continue
+            # stale cache (settings changed) — fall through and recompute
+        todo.append(band)
+
+    if not todo:
+        return lightcurves
+
+    # One metadata query for every band still needed (IRSA's cost is the spatial
+    # search, so this is ~1/3 the time of querying band by band).
+    try:
+        metadata = query_sci_metadata_bands(ra, dec, todo, config)
+    except NoImagesFoundError:
+        return lightcurves
+
+    if max_epochs is not None:
+        metadata = {band: df.tail(max_epochs).reset_index(drop=True) for band, df in metadata.items()}
+
     # Use a shared executor supplied by the batch wrapper, or own one locally.
     _own_executor = _download_executor is None
     dl_exec = _download_executor or ThreadPoolExecutor(max_workers=download_workers)
 
+    desc_base = f"({ra:.3f}, {dec:.3f})"
+    bar = tqdm(
+        total=2 * sum(len(df) for df in metadata.values()),
+        desc=f"{desc_base} downloading",
+        position=_tqdm_position,
+        leave=_tqdm_leave,
+        disable=not show_progress,
+        unit="step",
+    )
+    futures_by_band: dict[str, list[Future]] = {}
+
     try:
-        for band in bands:
-            lc_fpath = lightcurve_path(cache, ra, dec, band)
+        with tempfile.TemporaryDirectory() as _tmp:
+            tmp_dir = Path(_tmp)
 
-            # Cache hit: load and return if the key matches
-            if lc_fpath.exists() and not force_recompute:
-                lc = Lightcurve.load(lc_fpath)
-                if lc.cache_key == ck:
-                    if show_progress:
-                        tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
-                    lightcurves[band] = lc
-                    continue
-                # stale cache (settings changed) — fall through and recompute
+            # Download phase: every epoch of every band is submitted up front, so the
+            # pool never idles between bands.  The pool is FIFO, so bands finish in
+            # order and each is fitted and cached while the next is still downloading.
+            for band, df in metadata.items():
+                futures_by_band[band] = [
+                    dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config) for _, row in df.iterrows()
+                ]
 
-            # Query metadata
-            try:
-                df = query_sci_metadata(ra, dec, band, config)
-            except NoImagesFoundError:
-                continue
-
-            if max_epochs is not None:
-                df = df.tail(max_epochs).reset_index(drop=True)
-
-            desc_base = f"({ra:.3f}, {dec:.3f}) [{band}]"
-            bar = tqdm(
-                total=2 * len(df),
-                desc=f"{desc_base} downloading",
-                position=_tqdm_position,
-                leave=_tqdm_leave,
-                disable=not show_progress,
-                unit="step",
-            )
-
-            with tempfile.TemporaryDirectory() as _tmp:
-                tmp_dir = Path(_tmp)
-
-                # Download phase: all epochs submitted at once, collected as they finish
+            for band, futures in futures_by_band.items():
                 image_triples: list[tuple[pd.Series, Path, Path]] = []
-                dl_futures = {
-                    dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config): row
-                    for _, row in df.iterrows()
-                }
-                for fut in as_completed(dl_futures):
+                for fut in as_completed(futures):
                     with contextlib.suppress(Exception):
                         image_triples.append(fut.result())
                     bar.update(1)
 
                 if not image_triples:
-                    bar.close()
                     continue
 
                 # PSF photometry phase: sequential (CPU-fast, ~15 ms/epoch)
-                bar.set_description(f"{desc_base} fitting PSF")
+                bar.set_description(f"{desc_base} [{band}] fitting PSF")
                 results = []
                 for row, fits_p, psf_p in image_triples:
                     image_id = (
@@ -221,37 +230,44 @@ def run_forced_photometry(
                     results.append(
                         _process_one_epoch(str(fits_p), str(psf_p), ra, dec, band, image_id, config)
                     )
+                    # Done with this epoch; don't hold every band's images on disk at once.
+                    fits_p.unlink(missing_ok=True)
+                    psf_p.unlink(missing_ok=True)
                     bar.update(1)
+                bar.set_description(f"{desc_base} downloading")
 
-            bar.close()
+                results.sort(key=lambda d: d.get("obsjd", 0))
 
-            results.sort(key=lambda d: d.get("obsjd", 0))
+                # Assemble lightcurve
+                lc = Lightcurve(ra=ra, dec=dec)
+                for res in results:
+                    if not res.get("obsjd") or math.isnan(res.get("obsjd", float("nan"))):
+                        continue
+                    lc.add_epoch(
+                        obsjd=res["obsjd"],
+                        band=band,
+                        flux=res["flux"],
+                        flux_err=res["flux_err"],
+                        mag=res["mag"],
+                        mag_err=res["mag_err"],
+                        zero_point=res["zero_point"],
+                        flags=res["flags"],
+                        x_fit=res.get("x_fit"),
+                        y_fit=res.get("y_fit"),
+                        mag_limit=res.get("mag_limit"),
+                        image_id=res.get("image_id"),
+                    )
 
-            # Assemble lightcurve
-            lc = Lightcurve(ra=ra, dec=dec)
-            for res in results:
-                if not res.get("obsjd") or math.isnan(res.get("obsjd", float("nan"))):
-                    continue
-                lc.add_epoch(
-                    obsjd=res["obsjd"],
-                    band=band,
-                    flux=res["flux"],
-                    flux_err=res["flux_err"],
-                    mag=res["mag"],
-                    mag_err=res["mag_err"],
-                    zero_point=res["zero_point"],
-                    flags=res["flags"],
-                    x_fit=res.get("x_fit"),
-                    y_fit=res.get("y_fit"),
-                    mag_limit=res.get("mag_limit"),
-                    image_id=res.get("image_id"),
-                )
-
-            lc.cache_key = ck
-            lc.save(lc_fpath)
-            lightcurves[band] = lc
+                lc.cache_key = ck
+                lc.save(lightcurve_path(cache, ra, dec, band))
+                lightcurves[band] = lc
 
     finally:
+        bar.close()
+        # On an early exit, don't leave this target's downloads queued in a shared pool.
+        for futures in futures_by_band.values():
+            for fut in futures:
+                fut.cancel()
         if _own_executor:
             dl_exec.shutdown(wait=False)
 

@@ -156,7 +156,7 @@ def test_pipeline_empty_downloads_skips_band(tmp_path, mock_config):
 
     df = _make_metadata_row()
     with (
-        mock.patch("ztforce.pipeline.query_sci_metadata", return_value=df),
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": df}),
         mock.patch("ztforce.pipeline.download_fits", side_effect=Exception("network error")),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
     ):
@@ -171,7 +171,7 @@ def test_pipeline_empty_downloads_skips_band(tmp_path, mock_config):
 
 
 def test_cache_hit_skips_all_computation(tmp_path, mock_config):
-    """run_forced_photometry loads from cache and never calls query_sci_metadata."""
+    """run_forced_photometry loads from cache and never queries metadata."""
     from ztforce.cache import lightcurve_path, make_cache
     from ztforce.lightcurve import Lightcurve
     from ztforce.pipeline import _cache_key, run_forced_photometry
@@ -187,7 +187,7 @@ def test_cache_hit_skips_all_computation(tmp_path, mock_config):
     lc_pre.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, 26.3, 0)
     lc_pre.save(lc_path)
 
-    with mock.patch("ztforce.pipeline.query_sci_metadata") as mock_query:
+    with mock.patch("ztforce.pipeline.query_sci_metadata_bands") as mock_query:
         result = run_forced_photometry(
             150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
         )
@@ -242,7 +242,7 @@ def test_cache_hit_stale_key_triggers_recompute(tmp_path, mock_config):
     lc_pre.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, 26.3, 0)
     lc_pre.save(lc_path)
 
-    with mock.patch("ztforce.pipeline.query_sci_metadata") as mock_query:
+    with mock.patch("ztforce.pipeline.query_sci_metadata_bands") as mock_query:
         mock_query.side_effect = NoImagesFoundError("none")
         run_forced_photometry(
             150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
@@ -267,7 +267,7 @@ def test_force_recompute_ignores_cache(tmp_path, mock_config):
     lc_pre.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, 26.3, 0)
     lc_pre.save(lc_path)
 
-    with mock.patch("ztforce.pipeline.query_sci_metadata") as mock_query:
+    with mock.patch("ztforce.pipeline.query_sci_metadata_bands") as mock_query:
         mock_query.side_effect = NoImagesFoundError("none")
         result = run_forced_photometry(
             150.0,
@@ -288,7 +288,7 @@ def test_no_images_returns_empty_dict(tmp_path, mock_config):
     from ztforce.exceptions import NoImagesFoundError
     from ztforce.pipeline import run_forced_photometry
 
-    with mock.patch("ztforce.pipeline.query_sci_metadata", side_effect=NoImagesFoundError("none")):
+    with mock.patch("ztforce.pipeline.query_sci_metadata_bands", side_effect=NoImagesFoundError("none")):
         result = run_forced_photometry(
             150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
         )
@@ -327,7 +327,7 @@ def test_pipeline_full_mocked(tmp_path, mock_config):
     )
 
     with (
-        mock.patch("ztforce.pipeline.query_sci_metadata", return_value=df),
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": df}),
         mock.patch("ztforce.pipeline.download_fits", return_value=fits_path),
         mock.patch("ztforce.pipeline.download_psf_sidecar", return_value=psf_fpath),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
@@ -373,7 +373,7 @@ def test_pipeline_saves_lightcurve_to_cache(tmp_path, mock_config):
     )
 
     with (
-        mock.patch("ztforce.pipeline.query_sci_metadata", return_value=df),
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": df}),
         mock.patch("ztforce.pipeline.download_fits", return_value=fits_path),
         mock.patch("ztforce.pipeline.download_psf_sidecar", return_value=psf_fpath),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
@@ -385,6 +385,109 @@ def test_pipeline_saves_lightcurve_to_cache(tmp_path, mock_config):
 
     expected = lightcurve_path(make_cache(tmp_path / "cache"), 150.0, 2.0, "g")
     assert expected.exists()
+
+
+# ── run_forced_photometry (multiple bands) ────────────────────────────────────
+
+
+def _fake_result(band: str, obsjd: float = 2459000.0) -> dict:
+    from ztforce.utils import flux_to_ab_mag
+
+    mag, merr = flux_to_ab_mag(1000.0, 26.3, 50.0)
+    return dict(
+        flux=1000.0,
+        flux_err=50.0,
+        mag=mag,
+        mag_err=merr,
+        flags=0,
+        x_fit=32.0,
+        y_fit=32.0,
+        obsjd=obsjd,
+        zero_point=26.3,
+        mag_limit=21.0,
+        image_id=f"468-3-2-{obsjd:.3f}",
+        band=band,
+    )
+
+
+def test_metadata_queried_once_for_all_uncached_bands(tmp_path, mock_config):
+    """Bands missing from the cache share one metadata query; cached bands are not re-queried."""
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.lightcurve import Lightcurve
+    from ztforce.pipeline import _cache_key, run_forced_photometry
+
+    cache = make_cache(tmp_path / "cache")
+    lc_pre = Lightcurve(ra=150.0, dec=2.0)
+    lc_pre.cache_key = _cache_key(mock_config, None)
+    lc_pre.add_epoch(2459000.0, "g", 1000.0, 50.0, 18.8, 0.05, 26.3, 0)
+    lc_pre.save(lightcurve_path(cache, 150.0, 2.0, "g"))
+
+    metadata = {"r": _make_metadata_row(obsjd=2459001.0), "i": _make_metadata_row(obsjd=2459002.0)}
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value=metadata) as mock_query,
+        mock.patch("ztforce.pipeline.download_fits"),
+        mock.patch("ztforce.pipeline.download_psf_sidecar"),
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+        mock.patch(
+            "ztforce.pipeline._process_one_epoch", side_effect=lambda *a, **k: _fake_result(a[4], 2459001.0)
+        ),
+    ):
+        result = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g", "r", "i"],
+            data_dir=tmp_path / "cache",
+            config=mock_config,
+            show_progress=False,
+        )
+
+    mock_query.assert_called_once()
+    assert mock_query.call_args.args[2] == ["r", "i"]
+    assert set(result) == {"g", "r", "i"}
+    for band in ("r", "i"):
+        assert lightcurve_path(cache, 150.0, 2.0, band).exists()
+
+
+def test_all_bands_submitted_before_first_fit(tmp_path, mock_config):
+    """Every band's downloads are queued before any band is fitted, so the pool never idles."""
+    from concurrent.futures import Future
+
+    from ztforce.pipeline import run_forced_photometry
+
+    events: list[tuple[str, str]] = []
+
+    class _SyncExecutor:
+        def submit(self, fn, *args, **kwargs):
+            events.append(("submit", args[0]["filtercode"]))
+            fut: Future = Future()
+            fut.set_result(fn(*args, **kwargs))
+            return fut
+
+    def _fit(*args, **kwargs):
+        events.append(("fit", args[4]))
+        return _fake_result(args[4])
+
+    df_g = _make_metadata_row(obsjd=2459000.0)
+    df_r = _make_metadata_row(obsjd=2459001.0).assign(filtercode="zr")
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": df_g, "r": df_r}),
+        mock.patch("ztforce.pipeline.download_fits"),
+        mock.patch("ztforce.pipeline.download_psf_sidecar"),
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+        mock.patch("ztforce.pipeline._process_one_epoch", side_effect=_fit),
+    ):
+        result = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g", "r"],
+            data_dir=tmp_path / "cache",
+            config=mock_config,
+            show_progress=False,
+            _download_executor=_SyncExecutor(),
+        )
+
+    assert events == [("submit", "zg"), ("submit", "zr"), ("fit", "g"), ("fit", "r")]
+    assert set(result) == {"g", "r"}
 
 
 # ── run_forced_photometry_batch ───────────────────────────────────────────────

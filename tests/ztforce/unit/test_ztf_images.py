@@ -29,6 +29,16 @@ def _make_row(field=468, ccdid=3, qid=2, obsjd=2459000.0, filtercode="zg"):
     )
 
 
+def _session(resp_or_exc):
+    """Mock requests.Session whose get() returns *resp_or_exc*, or raises it if it is an exception."""
+    session = mock.MagicMock()
+    if isinstance(resp_or_exc, Exception):
+        session.get.side_effect = resp_or_exc
+    else:
+        session.get.return_value = resp_or_exc
+    return session
+
+
 def _write_valid_fits(path: Path) -> None:
     fits.writeto(str(path), np.zeros((4, 4), dtype=np.float32), overwrite=True)
 
@@ -131,7 +141,7 @@ def test_download_fits_triggers_request(tmp_path, mock_config):
     resp.content = valid_bytes
     resp.raise_for_status = mock.MagicMock()
 
-    with mock.patch("ztforce.ztf_images.requests.get", return_value=resp):
+    with mock.patch("ztforce.ztf_images._get_session", return_value=_session(resp)):
         result = download_fits("http://fake/url", path, mock_config)
 
     assert result == path
@@ -150,7 +160,7 @@ def test_download_psf_sidecar_writes_bytes(tmp_path, mock_config):
     resp.content = b"PSF data"
     resp.raise_for_status = mock.MagicMock()
 
-    with mock.patch("ztforce.ztf_images.requests.get", return_value=resp):
+    with mock.patch("ztforce.ztf_images._get_session", return_value=_session(resp)):
         download_psf_sidecar("http://fake/url", path, mock_config)
 
     assert path.read_bytes() == b"PSF data"
@@ -168,7 +178,7 @@ def test_download_with_retry_success(tmp_path, mock_config):
     resp.content = b"some psf bytes"
     resp.raise_for_status = mock.MagicMock()
 
-    with mock.patch("ztforce.ztf_images.requests.get", return_value=resp):
+    with mock.patch("ztforce.ztf_images._get_session", return_value=_session(resp)):
         result = _download_with_retry("http://fake/url", path, mock_config, validate=False)
 
     assert result == path
@@ -186,7 +196,7 @@ def test_download_with_retry_exhausted_raises(tmp_path, mock_config):
     mock_config.retry_jitter = 0.0
 
     with (
-        mock.patch("ztforce.ztf_images.requests.get", side_effect=Exception("connection refused")),
+        mock.patch("ztforce.ztf_images._get_session", return_value=_session(Exception("connection refused"))),
         mock.patch("ztforce.ztf_images.time.sleep"),
         pytest.raises(FITSDownloadError),
     ):
@@ -207,11 +217,57 @@ def test_download_with_retry_retries_on_bad_status(tmp_path, mock_config):
     resp.raise_for_status.side_effect = Exception("403 Forbidden")
 
     with (
-        mock.patch("ztforce.ztf_images.requests.get", return_value=resp),
+        mock.patch("ztforce.ztf_images._get_session", return_value=_session(resp)),
         mock.patch("ztforce.ztf_images.time.sleep"),
         pytest.raises(FITSDownloadError),
     ):
         _download_with_retry("http://fake/url", path, mock_config, validate=False)
+
+
+def test_download_with_retry_closes_response_on_bad_status(tmp_path, mock_config):
+    """The response is closed even when raise_for_status fails, so connections aren't leaked."""
+    from ztforce.exceptions import FITSDownloadError
+    from ztforce.ztf_images import _download_with_retry
+
+    mock_config.max_retries = 1
+    mock_config.retry_base_delay = 0.0
+    mock_config.retry_jitter = 0.0
+    resp = mock.MagicMock()
+    resp.raise_for_status.side_effect = Exception("500 Server Error")
+
+    with (
+        mock.patch("ztforce.ztf_images._get_session", return_value=_session(resp)),
+        mock.patch("ztforce.ztf_images.time.sleep"),
+        pytest.raises(FITSDownloadError),
+    ):
+        _download_with_retry("http://fake/url", tmp_path / "x.psf", mock_config, validate=False)
+
+    resp.close.assert_called_once()
+
+
+# ── _get_session ──────────────────────────────────────────────────────────────
+
+
+def test_get_session_reused_within_thread_and_carries_auth(mock_config):
+    """Repeated calls on one thread return the same session, authenticated with the config."""
+    from ztforce.ztf_images import _get_session
+
+    first = _get_session(mock_config)
+    assert _get_session(mock_config) is first
+    assert first.auth == ("testuser", "testpass")
+
+
+def test_get_session_distinct_per_thread(mock_config):
+    """Each thread gets its own session (requests.Session is not documented thread-safe)."""
+    import threading
+
+    from ztforce.ztf_images import _get_session
+
+    sessions = []
+    thread = threading.Thread(target=lambda: sessions.append(_get_session(mock_config)))
+    thread.start()
+    thread.join()
+    assert sessions[0] is not _get_session(mock_config)
 
 
 # ── query_sci_metadata ────────────────────────────────────────────────────────
@@ -264,3 +320,74 @@ def test_query_sci_metadata_returns_sorted_df(mock_config):
         result = query_sci_metadata(_RA, _DEC, "g", mock_config)
 
     assert list(result["obsjd"]) == [2459001.0, 2459002.0]
+
+
+# ── query_sci_metadata_bands ──────────────────────────────────────────────────
+
+
+def _metatable(*filtercodes_and_jds):
+    return pd.DataFrame(
+        [
+            {"obsjd": jd, "field": 1, "ccdid": 1, "qid": 1, "filtercode": fc, "filefracday": 1}
+            for fc, jd in filtercodes_and_jds
+        ]
+    )
+
+
+def test_query_sci_metadata_bands_splits_by_band_in_one_query(mock_config):
+    """One IRSA query covers all bands; rows are split per band and sorted by obsjd."""
+    from ztforce.ztf_images import query_sci_metadata_bands
+
+    mock_zq = mock.MagicMock()
+    mock_zq.metatable = _metatable(("zr", 3.0), ("zg", 2.0), ("zg", 1.0), ("zi", 4.0))
+
+    with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq) as ctor:
+        result = query_sci_metadata_bands(_RA, _DEC, ["g", "r", "i"], mock_config)
+
+    ctor.assert_called_once()
+    # All three filters requested: no filter clause is sent at all.
+    assert mock_zq.load_metadata.call_args.kwargs["sql_query"] is None
+    assert list(result) == ["g", "r", "i"]
+    assert list(result["g"]["obsjd"]) == [1.0, 2.0]
+    assert list(result["r"]["obsjd"]) == [3.0]
+
+
+def test_query_sci_metadata_bands_subset_uses_in_clause(mock_config):
+    """A subset of bands is filtered server-side with an IN clause."""
+    from ztforce.ztf_images import query_sci_metadata_bands
+
+    mock_zq = mock.MagicMock()
+    mock_zq.metatable = _metatable(("zg", 1.0), ("zi", 2.0))
+
+    with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq):
+        query_sci_metadata_bands(_RA, _DEC, ["g", "i"], mock_config)
+
+    assert mock_zq.load_metadata.call_args.kwargs["sql_query"] == "filtercode IN ('zg','zi')"
+
+
+def test_query_sci_metadata_bands_omits_empty_bands(mock_config):
+    """Bands with no rows are left out of the result rather than returned empty."""
+    from ztforce.ztf_images import query_sci_metadata_bands
+
+    mock_zq = mock.MagicMock()
+    mock_zq.metatable = _metatable(("zg", 1.0))
+
+    with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq):
+        result = query_sci_metadata_bands(_RA, _DEC, ["g", "i"], mock_config)
+
+    assert list(result) == ["g"]
+
+
+def test_query_sci_metadata_bands_raises_when_no_requested_band(mock_config):
+    """NoImagesFoundError when the rows returned contain none of the requested bands."""
+    from ztforce.exceptions import NoImagesFoundError
+    from ztforce.ztf_images import query_sci_metadata_bands
+
+    mock_zq = mock.MagicMock()
+    mock_zq.metatable = _metatable(("zr", 1.0))
+
+    with (
+        mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq),
+        pytest.raises(NoImagesFoundError),
+    ):
+        query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)

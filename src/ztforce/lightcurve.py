@@ -29,8 +29,8 @@ class Lightcurve:
     Uncertainties are statistical only (sky + Poisson), so they are underestimated:
     they omit calibration/PSF systematics (bright sources) and, since the fit is on
     science images rather than difference images, residual host light that varies
-    with seeing (extended hosts).  ``chisq`` flags poor PSF fits but is not used to
-    rescale errors, as a static host inflates it without adding epoch-to-epoch noise.
+    with seeing (extended hosts).  ``chisq`` is ~1 for an isolated point source and
+    flags extended, blended, or poorly fit sources; it is not used to rescale errors.
     """
 
     def __init__(self, ra: float, dec: float) -> None:

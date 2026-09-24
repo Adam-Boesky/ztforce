@@ -166,12 +166,32 @@ def test_footprint_returns_ra_dec_bounds(synthetic_fits_file, mock_config):
     assert dec_min < 2.0 < dec_max
 
 
-def test_cutout_origin_defaults_to_zero(synthetic_fits_file, mock_config):
-    """cutout_origin is (0, 0) when LTV keywords are absent (full-image download)."""
+def test_cutout_origin_from_crpix_without_ltv(synthetic_fits_file, mock_config):
+    """IBE cutouts carry no LTV: the origin is the full quadrant's CRPIX minus the cutout's."""
+    from astropy.io import fits
+    from ztforce._constants import ZTF_QUADRANT_CRPIX
     from ztforce.image import ZTFImage
 
     path, _, _ = synthetic_fits_file
+    hdr = fits.getheader(path)
+    assert "LTV1" not in hdr
     img = ZTFImage(str(path), "g", mock_config)
+    assert img.cutout_origin == (
+        ZTF_QUADRANT_CRPIX[0] - hdr["CRPIX1"],
+        ZTF_QUADRANT_CRPIX[1] - hdr["CRPIX2"],
+    )
+    img = ZTFImage(str(path), "g", mock_config, full_crpix=(1000.5, 800.5))
+    assert img.cutout_origin == (1000.5 - hdr["CRPIX1"], 800.5 - hdr["CRPIX2"])
+
+
+def test_cutout_origin_zero_for_full_quadrant(synthetic_fits_file, mock_config):
+    """An image whose CRPIX is the full quadrant's is the full quadrant: origin (0, 0)."""
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+
+    path, _, _ = synthetic_fits_file
+    hdr = fits.getheader(path)
+    img = ZTFImage(str(path), "g", mock_config, full_crpix=(hdr["CRPIX1"], hdr["CRPIX2"]))
     assert img.cutout_origin == (0.0, 0.0)
 
 
@@ -199,10 +219,12 @@ def test_cutout_origin_from_ltv_keywords(tmp_path, mock_config):
 
 def test_sky_to_full_quadrant_pixel_no_offset(synthetic_fits_file, mock_config):
     """sky_to_full_quadrant_pixel equals sky_to_pixel when there is no cutout offset."""
+    from astropy.io import fits
     from ztforce.image import ZTFImage
 
     path, cx, cy = synthetic_fits_file
-    img = ZTFImage(str(path), "g", mock_config)
+    hdr = fits.getheader(path)
+    img = ZTFImage(str(path), "g", mock_config, full_crpix=(hdr["CRPIX1"], hdr["CRPIX2"]))
     coord = img.pixel_to_sky(float(cx), float(cy))
     x_cut, y_cut = img.sky_to_pixel(coord)
     x_full, y_full = img.sky_to_full_quadrant_pixel(coord)

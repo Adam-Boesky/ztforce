@@ -33,7 +33,7 @@ def test_parse_header_values(synthetic_psf_file):
 
     parsed = parse_daophot_psf(synthetic_psf_file)
     assert parsed["psf_type"] == "GAUSSIAN"
-    assert parsed["psf_size"] == 11
+    assert parsed["psf_size"] == 47
     assert parsed["n_tables"] == 3
     assert parsed["norm_factor"] == pytest.approx(1000.0)
     assert parsed["x_cen"] == pytest.approx(1535.5)
@@ -111,7 +111,7 @@ def test_reconstruct_peak_near_center(synthetic_psf_file):
 
     parsed = parse_daophot_psf(synthetic_psf_file)
     psf = reconstruct_psf(parsed, parsed["x_cen"], parsed["y_cen"])
-    c = parsed["psf_size"] // 2
+    c = psf.shape[0] // 2  # the stamp covers half the table size (half-pixel sampling)
     peak_r, peak_c = np.unravel_index(psf.argmax(), psf.shape)
     assert abs(peak_r - c) <= 1
     assert abs(peak_c - c) <= 1
@@ -143,12 +143,12 @@ def test_poly_weights_n3():
 
 
 def test_poly_weights_n6():
-    """_poly_weights for n=6 returns full degree-2 basis."""
+    """_poly_weights for n=6 returns DAOPHOT's degree-2 basis (USEPSF: 1.5 x^2 - 0.5)."""
     from ztforce.psf import _poly_weights
 
     dx, dy = 0.5, -0.3
     result = _poly_weights(dx, dy, 6)
-    assert result == [1.0, dx, dy, dx * dx, dx * dy, dy * dy]
+    assert result == pytest.approx([1.0, dx, dy, 1.5 * dx * dx - 0.5, dx * dy, 1.5 * dy * dy - 0.5])
 
 
 def test_reconstruct_all_zero_raises(tmp_path):
@@ -177,7 +177,7 @@ def test_poly_weights_generic_n4():
 
     dx, dy = 0.5, -0.3
     result = _poly_weights(dx, dy, 4)
-    assert result == [1.0, dx, dy, dx * dx]
+    assert result == pytest.approx([1.0, dx, dy, 1.5 * dx * dx - 0.5])
 
 
 def test_poly_weights_generic_n5():
@@ -186,7 +186,7 @@ def test_poly_weights_generic_n5():
 
     dx, dy = 0.5, -0.3
     result = _poly_weights(dx, dy, 5)
-    assert result == [1.0, dx, dy, dx * dx, dx * dy]
+    assert result == pytest.approx([1.0, dx, dy, 1.5 * dx * dx - 0.5, dx * dy])
 
 
 # ── forced_phot_at_position ───────────────────────────────────────────────────
@@ -200,8 +200,9 @@ def test_forced_phot_detects_injected_source(synthetic_fits_file, synthetic_psf_
     path, cx, cy = synthetic_fits_file
     img = ZTFImage(str(path), "g", mock_config)
     parsed_psf = parse_daophot_psf(synthetic_psf_file)
-    # Set sigmas to match the injected source (FWHM=3px → sigma=3/2.355)
-    parsed_psf["sigmas"] = [3.0 / 2.355, 3.0 / 2.355]
+    # Match the injected source: FWHM 3 px, so HWHM 1.5 px (DAOPhot's GAUSSIAN parameters)
+    parsed_psf["sigmas"] = [1.5, 1.5]
+    parsed_psf["tables"] = np.zeros_like(parsed_psf["tables"])  # pure Gaussian, like the injection
 
     coord = img.pixel_to_sky(float(cx), float(cy))
     result = forced_phot_at_position(img, parsed_psf, coord)
@@ -212,7 +213,7 @@ def test_forced_phot_detects_injected_source(synthetic_fits_file, synthetic_psf_
     sigma = 3.0 / 2.355
     expected_flux = 5000.0 * 2 * np.pi * sigma**2
     frac_err = abs(result["flux"] - expected_flux) / expected_flux
-    assert frac_err < 0.30, f"Flux {result['flux']:.0f} vs expected {expected_flux:.0f}"
+    assert frac_err < 0.03, f"Flux {result['flux']:.0f} vs expected {expected_flux:.0f}"
 
 
 def test_forced_phot_returns_finite_mag(synthetic_fits_file, synthetic_psf_file, mock_config):

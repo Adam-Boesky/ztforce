@@ -30,12 +30,16 @@ def cache(tmp_path):
 
 @pytest.fixture()
 def synthetic_psf_file(tmp_path) -> Path:
-    """Write a minimal valid DAOPhot PSF sidecar and return its path."""
-    psf_size = 11
+    """Write a minimal valid DAOPhot PSF sidecar and return its path.
+
+    Laid out like ZTF's: a 47x47 table sampled every half pixel (radius 11 px), and a
+    GAUSSIAN whose two parameters are half-widths at half-maximum.
+    """
+    psf_size = 47
     n_tables = 3
     x_cen, y_cen = 1535.5, 1539.5
     norm_factor = 1000.0
-    sigma = 1.5
+    sigma = 1.5  # HWHM in pixels (FWHM 3 px)
 
     header = (
         f" GAUSSIAN  {psf_size:3d}    2    {n_tables}    0   14.000"
@@ -45,10 +49,11 @@ def synthetic_psf_file(tmp_path) -> Path:
 
     c = psf_size // 2
     row_idx, col_idx = np.mgrid[0:psf_size, 0:psf_size]
-    gauss = norm_factor * np.exp(-0.5 * ((col_idx - c) ** 2 / sigma**2 + (row_idx - c) ** 2 / sigma**2))
+    ox, oy = (col_idx - c) / 2.0, (row_idx - c) / 2.0  # table entries are half a pixel apart
+    gauss = norm_factor * np.exp(-np.log(2) * (ox**2 + oy**2) / sigma**2)
     # T1/T2 use gradient patterns so they don't cancel after normalization
-    t1 = (col_idx - c) / (c + 1) * gauss * 0.2  # x-gradient × Gaussian
-    t2 = (row_idx - c) / (c + 1) * gauss * 0.2  # y-gradient × Gaussian
+    t1 = ox / (c / 2.0 + 1) * gauss * 0.2  # x-gradient × Gaussian
+    t2 = oy / (c / 2.0 + 1) * gauss * 0.2  # y-gradient × Gaussian
     tables = [np.zeros((psf_size, psf_size)), t1, t2]
 
     def _fmt(t):

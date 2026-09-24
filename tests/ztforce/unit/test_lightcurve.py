@@ -96,6 +96,39 @@ def test_upper_limit_set_for_non_detection():
     assert row["mag_limit"] == pytest.approx(21.0)
 
 
+def test_non_detection_has_no_mag_but_keeps_flux():
+    """Below S/N 3 an epoch has no magnitude (only an upper limit); its flux is kept."""
+    lc = _make_lc()
+    _add_non_detection(lc, flux=100.0, flux_err=50.0)  # S/N 2, positive flux
+    row = lc.df.iloc[0]
+    assert not row["detection"]
+    assert np.isnan(row["mag"]) and np.isnan(row["mag_err"])
+    assert row["flux"] == pytest.approx(100.0) and row["flux_err"] == pytest.approx(50.0)
+    assert np.isfinite(row["upper_limit"])
+
+
+def test_detection_keeps_mag():
+    """A detection keeps its magnitude and error."""
+    lc = _make_lc()
+    _add_detection(lc, flux=1000.0, flux_err=50.0)
+    row = lc.df.iloc[0]
+    assert row["detection"]
+    assert row["mag"] == pytest.approx(_ZP - 2.5 * np.log10(1000.0))
+    assert np.isfinite(row["mag_err"])
+
+
+def test_flagged_bright_epoch_has_no_mag():
+    """A flagged epoch is not a detection however bright, so it gets no magnitude."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    mag, merr = flux_to_ab_mag(5000.0, _ZP, 50.0)
+    lc.add_epoch(2459000.0, "g", 5000.0, 50.0, mag, merr, _ZP, flags=16)
+    row = lc.df.iloc[0]
+    assert np.isnan(row["mag"])
+    assert row["flux"] == pytest.approx(5000.0)
+
+
 def test_upper_limit_nan_for_flagged_epoch():
     """A flagged epoch is not a usable non-detection, so it gets no upper limit."""
     from ztforce.utils import flux_to_ab_mag

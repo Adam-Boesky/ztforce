@@ -65,7 +65,9 @@ class Lightcurve:
         """Append one exposure's measurement.
 
         ``flags`` is the quality bitmask (see ``ztforce._constants``); only epochs with
-        ``flags == 0`` can be detections or enter a stack.
+        ``flags == 0`` can be detections or enter a stack.  ``mag``/``mag_err`` are kept
+        only for detections (S/N >= SNT); other epochs get NaN there and, if good, an
+        SNU-sigma ``upper_limit``.  ``flux``/``flux_err`` are always kept.
         """
         snr = flux / flux_err if flux_err and flux_err > 0 else float("nan")
         is_det = np.isfinite(snr) and snr >= SNT and flags == 0
@@ -82,8 +84,10 @@ class Lightcurve:
                 band=band,
                 flux=flux,
                 flux_err=flux_err,
-                mag=mag,
-                mag_err=mag_err,
+                # A magnitude only for detections, as in the ZTF and PS1 catalogs; a
+                # non-detection has an upper limit instead (ZFPS guide section 6.4).
+                mag=mag if is_det else float("nan"),
+                mag_err=mag_err if is_det else float("nan"),
                 zero_point=zero_point,
                 flags=flags,
                 snr=snr,

@@ -28,29 +28,6 @@ def flux_to_ab_mag(
     return mag, mag_err
 
 
-def ab_mag_to_flux(
-    mag: float,
-    zero_point: float,
-    mag_err: float | None = None,
-) -> tuple[float, float | None]:
-    """Convert AB magnitude to instrumental flux.
-
-    Returns (flux, flux_err). flux_err is None when mag_err is not given.
-    """
-    flux = 10.0 ** ((zero_point - mag) / 2.5)
-    if mag_err is None:
-        return flux, None
-    flux_err = abs(flux * np.log(10) / 2.5 * mag_err)
-    return flux, flux_err
-
-
-def snr_from_flux(flux: float, flux_err: float) -> float:
-    """Signal-to-noise ratio from flux and its uncertainty."""
-    if flux_err == 0:
-        return float("inf")
-    return flux / flux_err
-
-
 def has_nan_nearby(
     row: int,
     col: int,
@@ -64,12 +41,6 @@ def has_nan_nearby(
     c1 = min(mask.shape[1], int(col + radius) + 1)
     patch = mask[r0:r1, c0:c1]
     return bool(patch.any())
-
-
-def nearest_odd_int(x: float) -> int:
-    """Round *x* up to the nearest odd integer."""
-    n = int(np.ceil(x))
-    return n if n % 2 == 1 else n + 1
 
 
 def annular_background(

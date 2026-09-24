@@ -96,6 +96,39 @@ def test_upper_limit_set_for_non_detection():
     assert row["mag_limit"] == pytest.approx(21.0)
 
 
+def test_non_detection_has_no_mag_but_keeps_flux():
+    """Below S/N 3 an epoch has no magnitude (only an upper limit); its flux is kept."""
+    lc = _make_lc()
+    _add_non_detection(lc, flux=100.0, flux_err=50.0)  # S/N 2, positive flux
+    row = lc.df.iloc[0]
+    assert not row["detection"]
+    assert np.isnan(row["mag"]) and np.isnan(row["mag_err"])
+    assert row["flux"] == pytest.approx(100.0) and row["flux_err"] == pytest.approx(50.0)
+    assert np.isfinite(row["upper_limit"])
+
+
+def test_detection_keeps_mag():
+    """A detection keeps its magnitude and error."""
+    lc = _make_lc()
+    _add_detection(lc, flux=1000.0, flux_err=50.0)
+    row = lc.df.iloc[0]
+    assert row["detection"]
+    assert row["mag"] == pytest.approx(_ZP - 2.5 * np.log10(1000.0))
+    assert np.isfinite(row["mag_err"])
+
+
+def test_flagged_bright_epoch_has_no_mag():
+    """A flagged epoch is not a detection however bright, so it gets no magnitude."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    mag, merr = flux_to_ab_mag(5000.0, _ZP, 50.0)
+    lc.add_epoch(2459000.0, "g", 5000.0, 50.0, mag, merr, _ZP, flags=16)
+    row = lc.df.iloc[0]
+    assert np.isnan(row["mag"])
+    assert row["flux"] == pytest.approx(5000.0)
+
+
 def test_upper_limit_nan_for_flagged_epoch():
     """A flagged epoch is not a usable non-detection, so it gets no upper limit."""
     from ztforce.utils import flux_to_ab_mag
@@ -349,6 +382,40 @@ def test_rolling_stack_images_ivw_analytic():
     assert first["flux_err_stack"] == pytest.approx(expected_err * _K, rel=1e-6)
 
 
+@pytest.mark.parametrize(("n", "window", "step"), [(10, 4, None), (10, 5, None), (11, 4, 3), (7, 7, None)])
+def test_rolling_stack_images_exact_windows_cover_every_epoch(n, window, step):
+    """Every image window holds exactly `window` epochs, and together they cover all of them."""
+    lc = _make_lc()
+    for i in range(n):
+        _add_detection(lc, obsjd=2459000.0 + i)
+    result = lc.rolling_stack(window=window, window_unit="images", step=step)
+    assert (result["n_epochs"] == window).all()
+    # The newest epoch is in the last window: its IVW centre sits within the last `window` epochs.
+    assert result["obsjd_center"].max() > 2459000.0 + n - window
+
+
+def test_rolling_stack_images_skips_flagged_epochs():
+    """Flagged epochs neither enter nor use up an image window."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    for i in range(6):
+        _add_detection(lc, obsjd=2459000.0 + i)
+        mag, merr = flux_to_ab_mag(1000.0, _ZP, 50.0)
+        lc.add_epoch(2459000.5 + i, "g", 1000.0, 50.0, mag, merr, _ZP, flags=4)
+    result = lc.rolling_stack(window=3, window_unit="images", step=3)
+    assert list(result["n_epochs"]) == [3, 3]
+
+
+def test_rolling_stack_images_short_band_gives_one_window():
+    """A band with fewer good epochs than the window still gets a stack of all of them."""
+    lc = _make_lc()
+    for i in range(2):
+        _add_detection(lc, obsjd=2459000.0 + i)
+    result = lc.rolling_stack(window=5, window_unit="images")
+    assert list(result["n_epochs"]) == [2]
+
+
 def test_rolling_stack_obsjd_center_is_ivw_weighted_mean():
     """obsjd_center is the IVW-weighted mean JD of the window, not the arithmetic midpoint."""
     lc = _make_lc()
@@ -464,3 +531,38 @@ def test_len_matches_epoch_count():
 
 
 # ── plot (smoke test) ─────────────────────────────────────────────────────────
+
+
+def test_stack_with_no_good_epochs_is_empty():
+    """stack() on a lightcurve whose epochs are all flagged returns an empty table, not an error."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    mag, merr = flux_to_ab_mag(1000.0, _ZP, 50.0)
+    lc.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, _ZP, flags=4)
+    result = lc.stack()
+    assert result.empty
+    assert "flux_stack" in result.columns
+
+
+def test_empty_lightcurve_stacks_saves_and_loads(tmp_path):
+    """An empty lightcurve stacks to empty tables and survives save/load."""
+    from ztforce.lightcurve import Lightcurve
+
+    lc = _make_lc()
+    assert lc.stack().empty
+    assert lc.rolling_stack(window=30.0).empty
+    path = tmp_path / "empty.ecsv"
+    lc.save(path)
+    assert len(Lightcurve.load(path)) == 0
+
+
+def test_empty_image_id_round_trips_as_text(tmp_path):
+    """An empty image_id comes back as an empty string, not NaN."""
+    from ztforce.lightcurve import Lightcurve
+
+    lc = _make_lc()
+    _add_detection(lc)  # no image_id given
+    path = tmp_path / "lc.ecsv"
+    lc.save(path)
+    assert Lightcurve.load(path).df.iloc[0]["image_id"] == ""

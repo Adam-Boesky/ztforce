@@ -13,6 +13,15 @@ class FITSDownloadError(ZTForceError):
     """FITS file download failed after maximum retries."""
 
 
+class ProductUnavailableError(FITSDownloadError):
+    """IRSA does not serve the requested file (HTTP 401/403/404/410); retrying won't help."""
+
+    def __init__(self, url: str, status: int) -> None:
+        super().__init__(f"HTTP {status} for {url}")
+        self.url = url
+        self.status = status
+
+
 class NoImagesFoundError(ZTForceError):
     """No ZTF science images cover the requested position."""
 

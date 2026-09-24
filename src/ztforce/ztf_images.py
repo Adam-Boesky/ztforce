@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import random
 import threading
 import time
@@ -11,15 +12,16 @@ from pathlib import Path
 import pandas as pd
 import requests
 from astropy.io import fits
-from ztfquery import buildurl
-from ztfquery import query as zquery
+from ztfquery import buildurl, metasearch
 
 from ._constants import DEFAULT_CUTOUT_SIZE_ARCMIN
 from .config import ZTForceConfig
-from .exceptions import FITSDownloadError, NoImagesFoundError
+from .exceptions import FITSDownloadError, NoImagesFoundError, ProductUnavailableError
 
 _IRSA_BASE = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products"
 _DOWNLOAD_TIMEOUT_SEC = 120
+_METADATA_TIMEOUT_SEC = 180  # the spatial search itself can take ~30 s
+_PERMANENT_HTTP_ERRORS = frozenset({401, 403, 404, 410})
 
 _BAND_TO_FILTERCODE = {"g": "zg", "r": "zr", "i": "zi"}
 _REQUIRED_METADATA_COLS = {"obsjd", "field", "ccdid", "qid", "filtercode", "filefracday"}
@@ -30,9 +32,8 @@ def query_sci_metadata_bands(
     dec: float,
     bands: Sequence[str],
     config: ZTForceConfig,
-    search_radius_deg: float = 0.01,
 ) -> dict[str, pd.DataFrame]:
-    """Query ZTF IRSA once for the science exposures covering (ra, dec) in all *bands*.
+    """Query ZTF IRSA once for the science exposures whose footprint contains (ra, dec).
 
     IRSA's cost is the spatial search, not the band filter, so one query for every
     band takes about as long as a query for any single band.
@@ -51,15 +52,10 @@ def query_sci_metadata_bands(
     last_exc: Exception | None = None
     for attempt in range(config.max_retries):
         try:
-            zq = zquery.ZTFQuery()
-            zq.load_metadata(
-                kind="sci",
-                radec=(ra, dec),
-                size=search_radius_deg,
-                sql_query=sql_query,
-                auth=(config.irsa_user, config.irsa_pass),
-            )
-            df = zq.metatable
+            # A point search for footprints containing the target: an area search also
+            # returns exposures where it falls just off the CCD, which cannot be measured.
+            url = metasearch.build_query(kind="sci", radec=(ra, dec), sql_query=sql_query, ct="csv")
+            df = _fetch_metadata(url + "&INTERSECT=CENTER", config)
             if df is None or df.empty:
                 raise NoImagesFoundError(f"No {desc} science images found at ({ra:.5f}, {dec:.5f}).")
             if not _REQUIRED_METADATA_COLS.issubset(df.columns):
@@ -89,19 +85,19 @@ def query_sci_metadata_bands(
     )
 
 
-def query_sci_metadata(
-    ra: float,
-    dec: float,
-    band: str,
-    config: ZTForceConfig,
-    search_radius_deg: float = 0.01,
-) -> pd.DataFrame:
-    """Query ZTF IRSA for all science exposures covering (ra, dec) in *band*.
+def _fetch_metadata(url: str, config: ZTForceConfig) -> pd.DataFrame:
+    """Run an IBE metadata search (URL from ztfquery) with a timeout.
 
-    Returns a DataFrame sorted by obsjd ascending.
-    Raises NoImagesFoundError when no images are found.
+    Same query and table as ``ztfquery``'s ``load_metadata``, but through the shared
+    session and with a timeout, so a stalled connection fails and is retried instead
+    of hanging the worker.
     """
-    return query_sci_metadata_bands(ra, dec, [band], config, search_radius_deg)[band]
+    resp = _get_session(config).get(url, timeout=_METADATA_TIMEOUT_SEC)
+    try:
+        resp.raise_for_status()
+        return pd.read_csv(io.StringIO(resp.text))
+    finally:
+        resp.close()
 
 
 def build_sci_url(
@@ -178,11 +174,18 @@ def _download_with_retry(
     config: ZTForceConfig,
     validate: bool = True,
 ) -> Path:
-    """Download *url* to *dest*, retrying on failure with exponential backoff."""
+    """Download *url* to *dest*, retrying on failure with exponential backoff.
+
+    Raises :class:`ProductUnavailableError` at once, without retrying, when IRSA says
+    the file is not there or not ours to read (401/403/404/410): IRSA's metadata lists
+    some exposures whose files its server does not hold.
+    """
     for attempt in range(config.max_retries):
         try:
             resp = _get_session(config).get(url, timeout=_DOWNLOAD_TIMEOUT_SEC)
             try:
+                if resp.status_code in _PERMANENT_HTTP_ERRORS:
+                    raise ProductUnavailableError(url, resp.status_code)
                 resp.raise_for_status()
                 dest.write_bytes(resp.content)
             finally:
@@ -191,6 +194,8 @@ def _download_with_retry(
             if not validate or _validate_fits(dest):
                 return dest
             dest.unlink(missing_ok=True)
+        except ProductUnavailableError:
+            raise
         except Exception:
             pass
         delay = config.retry_base_delay * (2**attempt) + random.uniform(0, config.retry_jitter)

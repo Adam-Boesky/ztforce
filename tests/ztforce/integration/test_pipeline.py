@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +17,7 @@ from astropy.wcs import WCS
 
 
 def _make_metadata_row(field=468, ccdid=3, qid=2, obsjd=2459000.0):
-    """Return a one-row metadata DataFrame as query_sci_metadata would."""
+    """Return a one-row metadata DataFrame, like one band of query_sci_metadata_bands."""
     return pd.DataFrame(
         [
             {
@@ -192,8 +193,8 @@ def test_process_one_epoch_records_quality_metrics(tmp_path, mock_config):
 # ── run_forced_photometry (empty downloads) ───────────────────────────────────
 
 
-def test_pipeline_empty_downloads_skips_band(tmp_path, mock_config):
-    """run_forced_photometry skips a band when all downloads fail."""
+def test_pipeline_failed_downloads_kept_as_flagged_rows(tmp_path, mock_config):
+    """A band whose downloads all fail is still returned, as flagged NaN rows, with a warning."""
     from ztforce.pipeline import run_forced_photometry
 
     df = _make_metadata_row()
@@ -201,12 +202,15 @@ def test_pipeline_empty_downloads_skips_band(tmp_path, mock_config):
         mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": df}),
         mock.patch("ztforce.pipeline.download_fits", side_effect=Exception("network error")),
         mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+        pytest.warns(UserWarning, match="1 failed"),
     ):
         result = run_forced_photometry(
             150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
         )
 
-    assert result == {}
+    row = result["g"].df.iloc[0]
+    assert row["flags"] & 64
+    assert np.isnan(row["flux"])
 
 
 # ── run_forced_photometry (cache hit) ─────────────────────────────────────────
@@ -530,6 +534,350 @@ def test_all_bands_submitted_before_first_fit(tmp_path, mock_config):
 
     assert events == [("submit", "zg"), ("submit", "zr"), ("fit", "g"), ("fit", "r")]
     assert set(result) == {"g", "r"}
+
+
+# ── metadata quality cuts (skip / measure modes) ─────────────────────────────
+
+
+def _meta(obsjd: float, infobits: int = 0, seeing: float = 2.0) -> pd.DataFrame:
+    return _make_metadata_row(obsjd=obsjd).assign(infobits=infobits, seeing=seeing)
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (dict(infobits=0, seeing=2.0), 0),
+        (dict(infobits=2**25, seeing=2.0), 4),
+        (dict(infobits=2**26, seeing=2.0), 4),  # newer bad-calibration bit
+        (dict(infobits=2**25 - 1, seeing=2.0), 0),
+        (dict(infobits=0, seeing=4.5), 16),
+        (dict(infobits=2**25, seeing=4.5), 20),
+        (dict(), 0),  # metadata without the columns: nothing to decide
+    ],
+)
+def test_metadata_flags(row, expected):
+    """Metadata infobits >= 2**25 flags bad calibration; metadata seeing > 4 arcsec flags seeing."""
+    from ztforce.pipeline import _metadata_flags
+
+    assert _metadata_flags(pd.Series(row, dtype=object)) == expected
+
+
+def _run_with_metadata(tmp_path, mock_config, metadata, measure_flagged, header_infobits=0):
+    """Run the pipeline on mocked metadata; the fit reports a clean header (no bit 25)."""
+    from ztforce.pipeline import run_forced_photometry
+
+    def _fit(*args, **kwargs):
+        res = _fake_result(args[4], obsjd=2459000.0)
+        res["image_id"] = args[5]
+        res["obsjd"] = float(args[5].rsplit("-", 1)[1])
+        res["infobits"] = header_infobits
+        return res
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": metadata}),
+        mock.patch("ztforce.pipeline.download_fits") as mock_dl,
+        mock.patch("ztforce.pipeline.download_psf_sidecar"),
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+        mock.patch("ztforce.pipeline._process_one_epoch", side_effect=_fit),
+    ):
+        result = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g"],
+            data_dir=tmp_path / "cache",
+            config=mock_config,
+            show_progress=False,
+            measure_flagged=measure_flagged,
+        )
+    return result, mock_dl
+
+
+def test_skip_mode_does_not_download_flagged_epoch(tmp_path, mock_config):
+    """By default a metadata-flagged epoch is not downloaded but stays as a flagged NaN row."""
+    metadata = pd.concat([_meta(2459000.0), _meta(2459001.0, infobits=2**25)], ignore_index=True)
+    result, mock_dl = _run_with_metadata(tmp_path, mock_config, metadata, measure_flagged=False)
+
+    assert mock_dl.call_count == 1  # only the good epoch
+    df = result["g"].df
+    assert len(df) == 2
+    bad = df[df["obsjd"] == 2459001.0].iloc[0]
+    assert bad["flags"] & 4
+    assert (bad["field"], bad["ccdid"], bad["qid"]) == (468, 3, 2)  # unmeasured rows too
+    assert np.isnan(bad["flux"])
+    assert bad["infobits"] == 2**25
+    assert not bad["detection"]
+    assert df[df["obsjd"] == 2459000.0].iloc[0]["flags"] == 0
+
+
+def test_measure_mode_flags_from_metadata_not_header(tmp_path, mock_config):
+    """measure_flagged=True fits the epoch and flags it from metadata, though the header is clean."""
+    result, mock_dl = _run_with_metadata(
+        tmp_path, mock_config, _meta(2459001.0, infobits=2**25), measure_flagged=True, header_infobits=0
+    )
+
+    assert mock_dl.call_count == 1
+    row = result["g"].df.iloc[0]
+    assert row["flags"] & 4
+    assert row["flux"] == pytest.approx(1000.0)
+    assert row["infobits"] == 2**25  # the metadata value, not the header's 0
+    assert not row["detection"]
+
+
+def test_band_of_only_flagged_epochs_is_still_returned(tmp_path, mock_config):
+    """A band whose every epoch is cut from metadata still gets a lightcurve of flagged rows."""
+    result, mock_dl = _run_with_metadata(
+        tmp_path, mock_config, _meta(2459001.0, seeing=5.0), measure_flagged=False
+    )
+
+    mock_dl.assert_not_called()
+    df = result["g"].df
+    assert len(df) == 1 and df.iloc[0]["flags"] & 16
+
+
+def test_measure_flagged_is_part_of_the_cache_key(mock_config):
+    """The two modes never share a cached lightcurve."""
+    from ztforce.pipeline import _cache_key
+
+    assert _cache_key(mock_config, None) == _cache_key(mock_config, None, False)
+    assert _cache_key(mock_config, None, False) != _cache_key(mock_config, None, True)
+
+
+# ── unavailable / failed epochs and retries ──────────────────────────────────
+
+
+def _run_downloads(tmp_path, mock_config, metadata, download_side_effect, **kwargs):
+    """Run the pipeline with a controllable download_fits; returns (result, download mock)."""
+    from ztforce.pipeline import run_forced_photometry
+
+    def _fit(*args, **kw):
+        res = _fake_result(args[4])
+        res["image_id"] = args[5]
+        res["obsjd"] = float(args[5].rsplit("-", 1)[1])
+        return res
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": metadata}),
+        mock.patch("ztforce.pipeline.download_fits", side_effect=download_side_effect) as mock_dl,
+        mock.patch("ztforce.pipeline.download_psf_sidecar"),
+        mock.patch("ztforce.pipeline.build_sci_url", side_effect=lambda row, *a, **k: str(row["obsjd"])),
+        mock.patch("ztforce.pipeline._process_one_epoch", side_effect=_fit),
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("ignore")
+        result = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g"],
+            data_dir=tmp_path / "cache",
+            config=mock_config,
+            show_progress=False,
+            **kwargs,
+        )
+    return result, mock_dl
+
+
+def _three_epochs():
+    return pd.concat([_meta(2459000.0), _meta(2459001.0), _meta(2459002.0)], ignore_index=True)
+
+
+def _downloads(unavailable=(), failing=()):
+    """download_fits side effect: 404 for `unavailable` obsjds, transient error for `failing`."""
+    from ztforce.exceptions import ProductUnavailableError
+
+    def _dl(url, dest, config):
+        jd = float(url)
+        if jd in unavailable:
+            raise ProductUnavailableError(url, 404)
+        if jd in failing:
+            raise RuntimeError("timeout")
+        return dest
+
+    return _dl
+
+
+def test_unavailable_and_failed_epochs_are_flagged_rows(tmp_path, mock_config):
+    """404s get FLAG_UNAVAILABLE, other failures FLAG_DOWNLOAD_FAILED; no epoch disappears."""
+    result, _ = _run_downloads(
+        tmp_path, mock_config, _three_epochs(), _downloads(unavailable={2459001.0}, failing={2459002.0})
+    )
+    flags = result["g"].df.set_index("obsjd")["flags"]
+    assert flags[2459000.0] == 0
+    assert flags[2459001.0] & 32 and not flags[2459001.0] & 64
+    assert flags[2459002.0] & 64 and not flags[2459002.0] & 32
+
+
+def test_next_run_retries_only_failed_downloads(tmp_path, mock_config):
+    """A cached band re-downloads just its failed epochs; unavailable ones are left alone."""
+    _run_downloads(
+        tmp_path, mock_config, _three_epochs(), _downloads(unavailable={2459001.0}, failing={2459002.0})
+    )
+
+    result, mock_dl = _run_downloads(
+        tmp_path, mock_config, _three_epochs(), _downloads(unavailable={2459001.0})
+    )
+    assert [float(c.args[0]) for c in mock_dl.call_args_list] == [2459002.0]  # only the failed one
+    flags = result["g"].df.set_index("obsjd")["flags"]
+    assert flags[2459002.0] == 0  # now measured
+    assert flags[2459001.0] & 32  # still unavailable, carried over from the cache
+    assert flags[2459000.0] == 0  # reused from the cache
+
+    # With nothing left to retry, the next run is a pure cache hit.
+    _, mock_dl = _run_downloads(tmp_path, mock_config, _three_epochs(), _downloads(unavailable={2459001.0}))
+    mock_dl.assert_not_called()
+
+
+def test_retry_unavailable_rechecks_missing_files(tmp_path, mock_config):
+    """retry_unavailable=True re-requests epochs IRSA previously did not serve."""
+    _run_downloads(tmp_path, mock_config, _three_epochs(), _downloads(unavailable={2459001.0}))
+
+    result, mock_dl = _run_downloads(
+        tmp_path, mock_config, _three_epochs(), _downloads(), retry_unavailable=True
+    )
+    assert [float(c.args[0]) for c in mock_dl.call_args_list] == [2459001.0]
+    assert (result["g"].df["flags"] == 0).all()
+
+
+def test_processing_error_epoch_is_kept(tmp_path, mock_config):
+    """An epoch whose image cannot be read stays as a FLAG_PROCESSING_ERROR row dated from metadata."""
+    from ztforce.pipeline import run_forced_photometry
+
+    failure = dict(
+        flux=np.nan,
+        flux_err=np.nan,
+        mag=np.nan,
+        mag_err=np.nan,
+        chisq=np.nan,
+        flags=2,
+        x_fit=np.nan,
+        y_fit=np.nan,
+        obsjd=np.nan,
+        zero_point=np.nan,
+        mag_limit=None,
+        image_id="468-3-2-2459000.000",
+        band="g",
+    )
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": _meta(2459000.0)}),
+        mock.patch("ztforce.pipeline.download_fits"),
+        mock.patch("ztforce.pipeline.download_psf_sidecar"),
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+        mock.patch("ztforce.pipeline._process_one_epoch", return_value=failure),
+        pytest.warns(UserWarning, match="1 processing error"),
+    ):
+        result = run_forced_photometry(
+            150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
+        )
+    row = result["g"].df.iloc[0]
+    assert row["obsjd"] == 2459000.0
+    assert row["flags"] & 2
+
+
+def test_back_to_back_exposures_are_measured_from_their_own_files(tmp_path, mock_config):
+    """Two exposures of one field 40 s apart get separate files, ids and measurements."""
+    from ztforce.pipeline import run_forced_photometry
+
+    rows = pd.concat(
+        [
+            _meta(2459000.50000).assign(filefracday="20200601000000"),
+            _meta(2459000.50046).assign(filefracday="20200601000460"),  # +40 s
+        ],
+        ignore_index=True,
+    )
+
+    def _write(url, dest, config):
+        dest.write_text(url)  # each file records which exposure it came from
+        return dest
+
+    def _fit(fits_path, psf_path, ra, dec, band, image_id, config, full_crpix=None):
+        res = _fake_result(band, obsjd=float(image_id.rsplit("-", 1)[1]))
+        res["image_id"] = image_id
+        res["flux"] = float(Path(fits_path).read_text())  # which file was actually fitted
+        assert Path(psf_path).read_text() == Path(fits_path).read_text()  # matching PSF
+        return res
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": rows}),
+        mock.patch("ztforce.pipeline.download_fits", side_effect=_write),
+        mock.patch("ztforce.pipeline.download_psf_sidecar", side_effect=_write),
+        mock.patch("ztforce.pipeline.build_sci_url", side_effect=lambda row, *a, **k: row["filefracday"]),
+        mock.patch("ztforce.pipeline._process_one_epoch", side_effect=_fit),
+    ):
+        result = run_forced_photometry(
+            150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
+        )
+
+    df = result["g"].df
+    assert (df[["field", "ccdid", "qid"]].to_numpy() == [468, 3, 2]).all()  # group columns
+    assert df["image_id"].nunique() == 2
+    assert sorted(df["flux"]) == [20200601000000.0, 20200601000460.0]
+    assert (df["flags"] == 0).all()
+
+
+# ── cache key and staleness ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "name", ["SNT", "SNU", "BAD_CALIBRATION_INFOBITS", "MAX_SCISIGPIX_DN", "MAX_SEEING_ARCSEC"]
+)
+def test_cache_key_changes_with_stored_result_settings(monkeypatch, mock_config, name):
+    """Thresholds baked into stored detections, limits and flags invalidate the cache."""
+    import ztforce.pipeline as pipeline
+
+    before = pipeline._cache_key(mock_config, None)
+    monkeypatch.setattr(pipeline, name, getattr(pipeline, name) * 2)
+    assert pipeline._cache_key(mock_config, None) != before
+
+
+def _write_cached(tmp_path, mock_config, queried_at):
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.lightcurve import Lightcurve
+    from ztforce.pipeline import _cache_key
+
+    lc = Lightcurve(ra=150.0, dec=2.0)
+    lc.cache_key = _cache_key(mock_config, None)
+    lc.queried_at = queried_at
+    lc.add_epoch(2459000.0, "g", 1000.0, 50.0, 18.8, 0.05, 26.3, 0)
+    lc.save(lightcurve_path(make_cache(tmp_path / "cache"), 150.0, 2.0, "g"))
+
+
+def _load_cached(tmp_path, mock_config):
+    from ztforce.pipeline import run_forced_photometry
+
+    return run_forced_photometry(
+        150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
+    )
+
+
+def test_old_cache_warns(tmp_path, mock_config):
+    """A cached lightcurve queried over a month ago warns that it misses newer epochs."""
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(timespec="seconds")
+    _write_cached(tmp_path, mock_config, old)
+    with pytest.warns(UserWarning, match="45 days old"):
+        result = _load_cached(tmp_path, mock_config)
+    assert len(result["g"]) == 1
+
+
+def test_fresh_cache_does_not_warn(tmp_path, mock_config):
+    """A recently queried cache loads silently."""
+    from datetime import datetime, timezone
+
+    _write_cached(tmp_path, mock_config, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _load_cached(tmp_path, mock_config)
+
+
+def test_new_lightcurve_records_query_time(tmp_path, mock_config):
+    """A freshly computed lightcurve stores when its metadata was queried, and it round-trips."""
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.lightcurve import Lightcurve
+
+    result, _ = _run_downloads(tmp_path, mock_config, _three_epochs(), _downloads())
+    assert result["g"].queried_at
+    saved = Lightcurve.load(lightcurve_path(make_cache(tmp_path / "cache"), 150.0, 2.0, "g"))
+    assert saved.queried_at == result["g"].queried_at
 
 
 # ── run_forced_photometry_batch ───────────────────────────────────────────────

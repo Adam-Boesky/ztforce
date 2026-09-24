@@ -46,3 +46,12 @@ def test_lightcurve_directory_created_on_first_access(cache):
 
     lc = lightcurve_path(cache, 0.0, 0.0, "g")
     assert lc.parent.exists()
+
+
+def test_lightcurve_path_separates_close_targets(tmp_path):
+    """Targets 0.02 arcsec apart get different cache files."""
+    from ztforce.cache import lightcurve_path, make_cache
+
+    cache = make_cache(tmp_path)
+    offset = 0.02 / 3600  # degrees
+    assert lightcurve_path(cache, 150.0, 2.0, "g") != lightcurve_path(cache, 150.0 + offset, 2.0, "g")

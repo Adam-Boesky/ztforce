@@ -280,3 +280,25 @@ def test_forced_phot_nan_region_returns_flags1(tmp_path, synthetic_psf_file, moc
     coord = img.pixel_to_sky(float(cx), float(cy))
     result = forced_phot_at_position(img, parsed_psf, coord)
     assert result["flags"] == 1
+
+
+@pytest.mark.parametrize(("saturate", "flagged"), [(1000.0, True), (1e6, False)])
+def test_forced_phot_flags_saturated_star(
+    synthetic_fits_file, synthetic_psf_file, mock_config, saturate, flagged
+):
+    """A star whose core reaches SATURATE is flagged; one below it is not."""
+    from astropy.io import fits
+    from ztforce._constants import FLAG_SATURATED
+    from ztforce.image import ZTFImage
+    from ztforce.psf import forced_phot_at_position, parse_daophot_psf
+
+    path, cx, cy = synthetic_fits_file
+    with fits.open(path, mode="update") as hdul:
+        hdul[0].header["SATURATE"] = saturate  # the injected star peaks at ~5100 DN
+    img = ZTFImage(str(path), "g", mock_config)
+    result = forced_phot_at_position(
+        img, parse_daophot_psf(synthetic_psf_file), img.pixel_to_sky(float(cx), float(cy))
+    )
+
+    assert bool(result["flags"] & FLAG_SATURATED) is flagged
+    assert np.isfinite(result["flux"])  # still measured

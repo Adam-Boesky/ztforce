@@ -23,6 +23,19 @@ def _nan_if_none(v: float | None) -> float:
     return float(v) if v is not None else float("nan")
 
 
+# Per-epoch columns, in the order add_epoch writes them.
+_EPOCH_COLUMNS = [
+    "obsjd", "band", "flux", "flux_err", "mag", "mag_err", "zero_point", "flags", "snr",
+    "detection", "upper_limit", "mag_limit", "x_fit", "y_fit", "image_id", "chisq",
+    "infobits", "seeing", "scisigpix", "field", "ccdid", "qid",
+]  # fmt: skip
+# Columns of a stack record (stack() drops obsjd_center and indexes by band).
+_STACK_COLUMNS = [
+    "obsjd_center", "band", "flux_stack", "flux_err_stack", "snr_stack", "detection",
+    "mag_stack", "mag_err_stack", "upper_limit_stack", "n_epochs",
+]  # fmt: skip
+
+
 class Lightcurve:
     """Per-source forced-photometry lightcurve in absolute AB magnitudes.
 
@@ -38,6 +51,8 @@ class Lightcurve:
         self.dec = dec
         self._rows: list[dict] = []
         self.cache_key: str = ""
+        # When the archive metadata behind these epochs was queried (ISO 8601, UTC).
+        self.queried_at: str = ""
 
     # ── I/O ──────────────────────────────────────────────────────────────────
 
@@ -59,11 +74,16 @@ class Lightcurve:
         infobits: int | None = None,
         seeing: float | None = None,
         scisigpix: float | None = None,
+        field: int | None = None,
+        ccdid: int | None = None,
+        qid: int | None = None,
     ) -> None:
         """Append one exposure's measurement.
 
         ``flags`` is the quality bitmask (see ``ztforce._constants``); only epochs with
-        ``flags == 0`` can be detections or enter a stack.
+        ``flags == 0`` can be detections or enter a stack.  ``mag``/``mag_err`` are kept
+        only for detections (S/N >= SNT); other epochs get NaN there and, if good, an
+        SNU-sigma ``upper_limit``.  ``flux``/``flux_err`` are always kept.
         """
         snr = flux / flux_err if flux_err and flux_err > 0 else float("nan")
         is_det = np.isfinite(snr) and snr >= SNT and flags == 0
@@ -80,8 +100,10 @@ class Lightcurve:
                 band=band,
                 flux=flux,
                 flux_err=flux_err,
-                mag=mag,
-                mag_err=mag_err,
+                # A magnitude only for detections, as in the ZTF and PS1 catalogs; a
+                # non-detection has an upper limit instead (ZFPS guide section 6.4).
+                mag=mag if is_det else float("nan"),
+                mag_err=mag_err if is_det else float("nan"),
                 zero_point=zero_point,
                 flags=flags,
                 snr=snr,
@@ -95,12 +117,18 @@ class Lightcurve:
                 infobits=infobits if infobits is not None else -1,
                 seeing=_nan_if_none(seeing),
                 scisigpix=_nan_if_none(scisigpix),
+                # ZTF field / CCD / quadrant the epoch was measured on (-1 if unknown)
+                field=field if field is not None else -1,
+                ccdid=ccdid if ccdid is not None else -1,
+                qid=qid if qid is not None else -1,
             )
         )
 
     @property
     def df(self) -> pd.DataFrame:
         """All epochs as a DataFrame, sorted by obsjd."""
+        if not self._rows:
+            return pd.DataFrame(columns=_EPOCH_COLUMNS)
         return pd.DataFrame(self._rows).sort_values("obsjd").reset_index(drop=True)
 
     @property
@@ -146,6 +174,8 @@ class Lightcurve:
             rec = self._stack_window(band, df[df["band"] == band])
             if rec is not None:
                 records.append(rec)
+        if not records:
+            return pd.DataFrame(columns=_STACK_COLUMNS[1:]).rename_axis("band")
         return pd.DataFrame(records).set_index("band").drop(columns="obsjd_center")
 
     def _stack_window(self, band: str, sub: pd.DataFrame) -> dict | None:
@@ -193,7 +223,8 @@ class Lightcurve:
         Args:
             window: Width of the rolling window in the units given by ``window_unit``.
             window_unit: ``'days'`` or ``'years'`` for time-based windows;
-                ``'images'`` for a fixed epoch count regardless of cadence.
+                ``'images'`` for exactly ``window`` good epochs per window, regardless
+                of cadence.
             bands: Bands to include (default: all present).
             step: Step between window centres in the same unit as ``window``.
                 Defaults to ``window / 2`` (50 % overlap).
@@ -220,6 +251,8 @@ class Lightcurve:
         df = self.df
         # Windows are half-open, [c - half, c + half), so an epoch on a shared edge counts
         # once; add windows until the last one extends past the newest epoch.
+        if df.empty:
+            return pd.DataFrame(columns=_STACK_COLUMNS)
         half = window_days / 2
         jd_min, jd_max = df["obsjd"].min(), df["obsjd"].max()
         n_extra = max(int(np.floor((jd_max - jd_min - window_days) / step)) + 1, 0)
@@ -232,21 +265,35 @@ class Lightcurve:
                 rec = self._stack_window(band, sub[sub["band"] == band])
                 if rec is not None:
                     records.append(rec)
-        return pd.DataFrame(records)
+        return pd.DataFrame(records, columns=_STACK_COLUMNS)
 
     def _rolling_stack_images(self, window: int, bands: list[str], step: int | None) -> pd.DataFrame:
+        """Stack consecutive runs of exactly ``window`` good epochs, stepping by ``step``.
+
+        Only good epochs (unflagged, finite flux, positive error) are counted.  The last
+        window always ends on the newest good epoch, so none is left out; a band with
+        ``window`` or fewer good epochs gives one window of all of them.
+        """
+        window = max(1, int(window))
         step = step or max(1, window // 2)
-        half = window // 2
         df = self.df
 
         records = []
         for band in bands:
-            lc = df[df["band"] == band].sort_values("obsjd").reset_index(drop=True)
-            for i in range(half, len(lc) - half, step):
-                rec = self._stack_window(band, lc.iloc[i - half : i + half + 1])
+            sub = df[df["band"] == band]
+            good = sub[(sub["flags"] == 0) & np.isfinite(sub["flux"]) & (sub["flux_err"] > 0)]
+            good = good.sort_values("obsjd").reset_index(drop=True)
+            n = len(good)
+            if n == 0:
+                continue
+            starts = list(range(0, max(n - window, 0) + 1, step))
+            if starts[-1] != max(n - window, 0):
+                starts.append(n - window)
+            for start in starts:
+                rec = self._stack_window(band, good.iloc[start : start + window])
                 if rec is not None:
                     records.append(rec)
-        return pd.DataFrame(records)
+        return pd.DataFrame(records, columns=_STACK_COLUMNS)
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
@@ -256,6 +303,7 @@ class Lightcurve:
         t.meta["ra"] = self.ra
         t.meta["dec"] = self.dec
         t.meta["cache_key"] = self.cache_key
+        t.meta["queried_at"] = self.queried_at
         t.write(str(path), format="ascii.ecsv", overwrite=True)
 
     @classmethod
@@ -264,7 +312,12 @@ class Lightcurve:
         t = Table.read(str(path), format="ascii.ecsv")
         lc = cls(ra=float(t.meta["ra"]), dec=float(t.meta["dec"]))
         lc.cache_key = t.meta.get("cache_key", "")
-        lc._rows = t.to_pandas().to_dict("records")
+        lc.queried_at = t.meta.get("queried_at", "")
+        df = t.to_pandas()
+        if "image_id" in df:
+            # An empty string round-trips through ECSV as a masked value; keep it text.
+            df["image_id"] = df["image_id"].fillna("").astype(str)
+        lc._rows = df.to_dict("records")
         return lc
 
     # ── Dunder ────────────────────────────────────────────────────────────────
@@ -275,6 +328,4 @@ class Lightcurve:
 
     def __repr__(self) -> str:
         """Short representation."""
-        return (
-            f"Lightcurve(ra={self.ra:.5f}, dec={self.dec:.5f}, " f"n_epochs={len(self)}, bands={self.bands})"
-        )
+        return f"Lightcurve(ra={self.ra:.5f}, dec={self.dec:.5f}, n_epochs={len(self)}, bands={self.bands})"

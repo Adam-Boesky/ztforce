@@ -13,9 +13,6 @@ from ._constants import ZTF_QUADRANT_CRPIX
 from .config import ZTForceConfig
 from .exceptions import WCSError
 
-# e-/ADU per coadded frame for ZTF deep stacks (Bellm et al. 2019, PASP, 131, 018002)
-_ZTF_GAIN_PER_FRAME = 5.8
-
 
 class ZTFImage:
     """Lazy-loading wrapper around a single ZTF science FITS image."""
@@ -90,17 +87,9 @@ class ZTFImage:
         hdr = self.header
         if "GAIN" in hdr:
             return float(hdr["GAIN"])
-        if "NFRAMES" in hdr:
-            return _ZTF_GAIN_PER_FRAME * float(hdr["NFRAMES"])
+        # NFRAMES in science headers counts the raw file's extensions, not stacked
+        # frames, so it says nothing about the gain.
         return self._config.default_gain
-
-    @property
-    def fwhm(self) -> float:
-        """Median PSF FWHM in pixels from header."""
-        hdr = self.header
-        if "MEDFWHM" in hdr:
-            return float(hdr["MEDFWHM"])
-        return float(hdr["SEEING"])
 
     @property
     def zero_point(self) -> float:
@@ -137,6 +126,12 @@ class ZTFImage:
         """
         p16, p84 = np.nanpercentile(self.data, [16, 84])
         return float(0.5 * (p84 - p16))
+
+    @property
+    def saturate(self) -> float | None:
+        """Saturation level of the science image in DN (header SATURATE), if present."""
+        v = self.header.get("SATURATE")
+        return float(v) if v is not None else None
 
     @property
     def mag_limit(self) -> float | None:
@@ -183,14 +178,6 @@ class ZTFImage:
             return self.wcs.pixel_to_world(x, y)
         except Exception as exc:
             raise WCSError(f"pixel_to_sky failed: {exc}") from exc
-
-    def footprint(self) -> tuple[tuple[float, float], tuple[float, float]]:
-        """Return ((ra_min, ra_max), (dec_min, dec_max)) of the image footprint."""
-        ny, nx = self.data.shape
-        corners = [self.pixel_to_sky(x, y) for x, y in [(0, 0), (nx, 0), (nx, ny), (0, ny)]]
-        ras = [c.ra.deg for c in corners]
-        decs = [c.dec.deg for c in corners]
-        return (min(ras), max(ras)), (min(decs), max(decs))
 
     # ── masks ─────────────────────────────────────────────────────────────────
 

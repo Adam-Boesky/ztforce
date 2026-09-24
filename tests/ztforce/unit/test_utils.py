@@ -14,16 +14,15 @@ def test_flux_to_mag_known_value():
     assert abs(mag - 26.3) < 1e-10
 
 
-def test_flux_to_mag_round_trip():
-    """flux_to_ab_mag and ab_mag_to_flux are exact inverses."""
-    from ztforce.utils import ab_mag_to_flux, flux_to_ab_mag
+def test_flux_to_mag_matches_formula():
+    """flux_to_ab_mag gives zp - 2.5 log10(flux) and 1.0857 * err / flux."""
+    from ztforce.utils import flux_to_ab_mag
 
     for flux in [10.0, 1000.0, 1e5]:
         ferr = flux * 0.01
         mag, merr = flux_to_ab_mag(flux, 26.3, ferr)
-        flux2, ferr2 = ab_mag_to_flux(mag, 26.3, merr)
-        assert abs(flux2 - flux) / flux < 1e-9
-        assert abs(ferr2 - ferr) / ferr < 1e-9
+        assert mag == pytest.approx(26.3 - 2.5 * np.log10(flux), rel=1e-12)
+        assert merr == pytest.approx(2.5 / np.log(10) * 0.01, rel=1e-12)
 
 
 def test_flux_to_mag_negative_flux_returns_nan():
@@ -53,29 +52,6 @@ def test_mag_error_propagation():
     _, merr = flux_to_ab_mag(flux, 26.3, ferr)
     expected = 2.5 / np.log(10) * ferr / flux
     assert abs(merr - expected) < 1e-12
-
-
-# ── ab_mag_to_flux ────────────────────────────────────────────────────────────
-
-
-def test_ab_mag_to_flux_no_error():
-    """ab_mag_to_flux without mag_err returns None for flux_err."""
-    from ztforce.utils import ab_mag_to_flux
-
-    flux, ferr = ab_mag_to_flux(20.0, 26.3)
-    assert flux > 0
-    assert ferr is None
-
-
-# ── snr_from_flux ─────────────────────────────────────────────────────────────
-
-
-def test_snr_from_flux():
-    """SNR = flux / flux_err."""
-    from ztforce.utils import snr_from_flux
-
-    assert snr_from_flux(100.0, 10.0) == pytest.approx(10.0)
-    assert snr_from_flux(100.0, 0.0) == float("inf")
 
 
 # ── has_nan_nearby ────────────────────────────────────────────────────────────
@@ -108,9 +84,6 @@ def test_has_nan_nearby_boundary():
     mask[0, 0] = True
     assert has_nan_nearby(0, 0, 1, mask)
     assert not has_nan_nearby(9, 9, 1, mask)
-
-
-# ── nearest_odd_int ───────────────────────────────────────────────────────────
 
 
 # ── annular_background ────────────────────────────────────────────────────────
@@ -157,25 +130,3 @@ def test_annular_background_fallback_on_sparse_annulus():
     # Tiny image so inner/outer radii leave very few pixels
     level, _ = annular_background(data, 5.0, 5.0, r_inner=1.0, r_outer=1.5)
     assert np.isfinite(level)
-
-
-@pytest.mark.parametrize(
-    "x,expected",
-    [
-        (1.0, 1),
-        (2.0, 3),
-        (3.0, 3),
-        (4.0, 5),
-        (13.1, 15),
-        (14.0, 15),
-        (15.0, 15),
-    ],
-)
-def test_nearest_odd_int(x, expected):
-    """nearest_odd_int returns the smallest odd integer >= x."""
-    from ztforce.utils import nearest_odd_int
-
-    result = nearest_odd_int(x)
-    assert result == expected
-    assert result % 2 == 1
-    assert result >= x

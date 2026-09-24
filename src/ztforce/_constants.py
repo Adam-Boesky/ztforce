@@ -1,6 +1,6 @@
 # Bump when the photometry algorithm changes in a way that makes existing
 # cached lightcurves stale (e.g. new background estimator, PSF fitting change).
-_PHOTOMETRY_VERSION = "4"
+_PHOTOMETRY_VERSION = "5"
 
 # CRPIX of a full ZTF CCD-quadrant science image (archive metadata crpix1/crpix2).
 # IBE cutouts carry no LTV keywords; they shift CRPIX instead, so a cutout's offset
@@ -21,6 +21,7 @@ FLAG_BAD_SEEING = 16  # seeing FWHM > 4 arcsec
 # Epochs listed in the archive metadata but not measured.
 FLAG_UNAVAILABLE = 32  # IRSA does not serve the file (404/410/401/403); not retried automatically
 FLAG_DOWNLOAD_FAILED = 64  # download kept failing (timeouts, 5xx); retried on the next run
+FLAG_SATURATED = 128  # a pixel under the PSF is at or above the image's SATURATE level
 
 BAD_CALIBRATION_INFOBITS = 2**25
 MAX_SCISIGPIX_DN = 25.0

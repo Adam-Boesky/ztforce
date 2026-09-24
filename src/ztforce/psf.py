@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from astropy.coordinates import SkyCoord
 
+from ._constants import FLAG_SATURATED
 from .exceptions import PSFBuildError, WCSError
 from .image import ZTFImage
 from .utils import annular_background, flux_to_ab_mag, has_nan_nearby
@@ -243,6 +244,10 @@ def forced_phot_at_position(
     # PSF model uses full-quadrant coordinates for the spatially-varying polynomial
     psf_stamp = reconstruct_psf(parsed_psf, x0_full, y0_full, x0 - xi, y0 - yi)
 
+    # A clipped (saturated) core biases the fitted flux low; flag it, still measure it.
+    saturate = image.saturate
+    saturated = saturate is not None and bool(np.any(raw_cutout[psf_stamp > 0] >= saturate))
+
     # Noise model: Poisson + sky background variance
     fallback_var = max(sky_rms**2, 1.0)
     noise_var = sky_rms**2 + np.abs(cutout) / image.gain
@@ -269,7 +274,7 @@ def forced_phot_at_position(
         mag=float(mag) if mag is not None else float("nan"),
         mag_err=float(mag_err) if mag_err is not None else float("nan"),
         chisq=chisq,
-        flags=0,
+        flags=FLAG_SATURATED if saturated else 0,
         x_fit=x0,
         y_fit=y0,
     )

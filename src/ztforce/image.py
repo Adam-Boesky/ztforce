@@ -136,6 +136,12 @@ class ZTFImage:
         return float(0.5 * (p84 - p16))
 
     @property
+    def saturate(self) -> float | None:
+        """Saturation level of the science image in DN (header SATURATE), if present."""
+        v = self.header.get("SATURATE")
+        return float(v) if v is not None else None
+
+    @property
     def mag_limit(self) -> float | None:
         """5-sigma limiting magnitude from header, if present."""
         v = self.header.get("MAGLIM")

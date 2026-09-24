@@ -771,6 +771,46 @@ def test_processing_error_epoch_is_kept(tmp_path, mock_config):
     assert row["flags"] & 2
 
 
+def test_back_to_back_exposures_are_measured_from_their_own_files(tmp_path, mock_config):
+    """Two exposures of one field 40 s apart get separate files, ids and measurements."""
+    from ztforce.pipeline import run_forced_photometry
+
+    rows = pd.concat(
+        [
+            _meta(2459000.50000).assign(filefracday="20200601000000"),
+            _meta(2459000.50046).assign(filefracday="20200601000460"),  # +40 s
+        ],
+        ignore_index=True,
+    )
+
+    def _write(url, dest, config):
+        dest.write_text(url)  # each file records which exposure it came from
+        return dest
+
+    def _fit(fits_path, psf_path, ra, dec, band, image_id, config, full_crpix=None):
+        res = _fake_result(band, obsjd=float(image_id.rsplit("-", 1)[1]))
+        res["image_id"] = image_id
+        res["flux"] = float(Path(fits_path).read_text())  # which file was actually fitted
+        assert Path(psf_path).read_text() == Path(fits_path).read_text()  # matching PSF
+        return res
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": rows}),
+        mock.patch("ztforce.pipeline.download_fits", side_effect=_write),
+        mock.patch("ztforce.pipeline.download_psf_sidecar", side_effect=_write),
+        mock.patch("ztforce.pipeline.build_sci_url", side_effect=lambda row, *a, **k: row["filefracday"]),
+        mock.patch("ztforce.pipeline._process_one_epoch", side_effect=_fit),
+    ):
+        result = run_forced_photometry(
+            150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
+        )
+
+    df = result["g"].df
+    assert df["image_id"].nunique() == 2
+    assert sorted(df["flux"]) == [20200601000000.0, 20200601000460.0]
+    assert (df["flags"] == 0).all()
+
+
 # ── cache key and staleness ───────────────────────────────────────────────────
 
 

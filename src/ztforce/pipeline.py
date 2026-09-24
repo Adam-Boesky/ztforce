@@ -93,8 +93,13 @@ def _download_epoch(
 
     Raises on failure so the caller can skip this epoch.
     """
-    obsjd = float(row["obsjd"])
-    stem = f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{obsjd:.3f}"
+    # filefracday identifies the exposure uniquely; field/filter/CCD/quadrant pick the
+    # file within it.  (JD to 3 decimals is 86 s, and ZTF takes back-to-back exposures
+    # of a field ~40 s apart, so a JD-based name let two exposures overwrite each other.)
+    stem = (
+        f"{int(row['filefracday'])}_{int(row['field'])}_{row['filtercode']}"
+        f"_{int(row['ccdid'])}_{int(row['qid'])}"
+    )
     local_fits = tmp_dir / f"{stem}.fits"
     local_psf = tmp_dir / f"{stem}.psf"
     fits_url = build_sci_url(row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin)
@@ -182,7 +187,8 @@ def _metadata_flags(row: pd.Series) -> int:
 
 
 def _image_id(row: pd.Series) -> str:
-    return f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.3f}"
+    """``field-ccdid-qid-obsjd``, with obsjd to 1e-5 d (0.9 s) so back-to-back exposures differ."""
+    return f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.5f}"
 
 
 def _unmeasured_result(row: pd.Series, band: str, flags: int) -> dict:

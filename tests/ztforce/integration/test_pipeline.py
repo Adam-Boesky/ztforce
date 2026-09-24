@@ -532,6 +532,111 @@ def test_all_bands_submitted_before_first_fit(tmp_path, mock_config):
     assert set(result) == {"g", "r"}
 
 
+# ── metadata quality cuts (skip / measure modes) ─────────────────────────────
+
+
+def _meta(obsjd: float, infobits: int = 0, seeing: float = 2.0) -> pd.DataFrame:
+    return _make_metadata_row(obsjd=obsjd).assign(infobits=infobits, seeing=seeing)
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (dict(infobits=0, seeing=2.0), 0),
+        (dict(infobits=2**25, seeing=2.0), 4),
+        (dict(infobits=2**26, seeing=2.0), 4),  # newer bad-calibration bit
+        (dict(infobits=2**25 - 1, seeing=2.0), 0),
+        (dict(infobits=0, seeing=4.5), 16),
+        (dict(infobits=2**25, seeing=4.5), 20),
+        (dict(), 0),  # metadata without the columns: nothing to decide
+    ],
+)
+def test_metadata_flags(row, expected):
+    """Metadata infobits >= 2**25 flags bad calibration; metadata seeing > 4 arcsec flags seeing."""
+    from ztforce.pipeline import _metadata_flags
+
+    assert _metadata_flags(pd.Series(row, dtype=object)) == expected
+
+
+def _run_with_metadata(tmp_path, mock_config, metadata, measure_flagged, header_infobits=0):
+    """Run the pipeline on mocked metadata; the fit reports a clean header (no bit 25)."""
+    from ztforce.pipeline import run_forced_photometry
+
+    def _fit(*args, **kwargs):
+        res = _fake_result(args[4], obsjd=2459000.0)
+        res["image_id"] = args[5]
+        res["obsjd"] = float(args[5].rsplit("-", 1)[1])
+        res["infobits"] = header_infobits
+        return res
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands", return_value={"g": metadata}),
+        mock.patch("ztforce.pipeline.download_fits") as mock_dl,
+        mock.patch("ztforce.pipeline.download_psf_sidecar"),
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+        mock.patch("ztforce.pipeline._process_one_epoch", side_effect=_fit),
+    ):
+        result = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g"],
+            data_dir=tmp_path / "cache",
+            config=mock_config,
+            show_progress=False,
+            measure_flagged=measure_flagged,
+        )
+    return result, mock_dl
+
+
+def test_skip_mode_does_not_download_flagged_epoch(tmp_path, mock_config):
+    """By default a metadata-flagged epoch is not downloaded but stays as a flagged NaN row."""
+    metadata = pd.concat([_meta(2459000.0), _meta(2459001.0, infobits=2**25)], ignore_index=True)
+    result, mock_dl = _run_with_metadata(tmp_path, mock_config, metadata, measure_flagged=False)
+
+    assert mock_dl.call_count == 1  # only the good epoch
+    df = result["g"].df
+    assert len(df) == 2
+    bad = df[df["obsjd"] == 2459001.0].iloc[0]
+    assert bad["flags"] & 4
+    assert np.isnan(bad["flux"])
+    assert bad["infobits"] == 2**25
+    assert not bad["detection"]
+    assert df[df["obsjd"] == 2459000.0].iloc[0]["flags"] == 0
+
+
+def test_measure_mode_flags_from_metadata_not_header(tmp_path, mock_config):
+    """measure_flagged=True fits the epoch and flags it from metadata, though the header is clean."""
+    result, mock_dl = _run_with_metadata(
+        tmp_path, mock_config, _meta(2459001.0, infobits=2**25), measure_flagged=True, header_infobits=0
+    )
+
+    assert mock_dl.call_count == 1
+    row = result["g"].df.iloc[0]
+    assert row["flags"] & 4
+    assert row["flux"] == pytest.approx(1000.0)
+    assert row["infobits"] == 2**25  # the metadata value, not the header's 0
+    assert not row["detection"]
+
+
+def test_band_of_only_flagged_epochs_is_still_returned(tmp_path, mock_config):
+    """A band whose every epoch is cut from metadata still gets a lightcurve of flagged rows."""
+    result, mock_dl = _run_with_metadata(
+        tmp_path, mock_config, _meta(2459001.0, seeing=5.0), measure_flagged=False
+    )
+
+    mock_dl.assert_not_called()
+    df = result["g"].df
+    assert len(df) == 1 and df.iloc[0]["flags"] & 16
+
+
+def test_measure_flagged_is_part_of_the_cache_key(mock_config):
+    """The two modes never share a cached lightcurve."""
+    from ztforce.pipeline import _cache_key
+
+    assert _cache_key(mock_config, None) == _cache_key(mock_config, None, False)
+    assert _cache_key(mock_config, None, False) != _cache_key(mock_config, None, True)
+
+
 # ── run_forced_photometry_batch ───────────────────────────────────────────────
 
 

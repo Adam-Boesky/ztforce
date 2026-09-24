@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
 
+import numpy as np
 import pandas as pd
 from astropy.coordinates import SkyCoord
 from tqdm.auto import tqdm
@@ -37,13 +38,14 @@ from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, quer
 # ── Cache key ────────────────────────────────────────────────────────────────
 
 
-def _cache_key(config: ZTForceConfig, max_epochs: int | None) -> str:
+def _cache_key(config: ZTForceConfig, max_epochs: int | None, measure_flagged: bool = False) -> str:
     """12-hex-char hash of the parameters that affect photometry output."""
     params = {
         "photometry_version": _PHOTOMETRY_VERSION,
         "cutout_size_arcmin": config.cutout_size_arcmin,
         "default_gain": config.default_gain,
         "max_epochs": max_epochs,
+        "measure_flagged": measure_flagged,
     }
     blob = json.dumps(params, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
@@ -135,6 +137,50 @@ def _quality_flags(result: dict) -> int:
     return flags
 
 
+def _metadata_flags(row: pd.Series) -> int:
+    """Quality-cut bits decidable from the archive metadata alone, before download.
+
+    The metadata ``infobits`` is the authoritative one: bit 25 (bad photometric
+    calibration) is set only in the archive database, never in the FITS header.
+    """
+    flags = 0
+    infobits = row.get("infobits")
+    if infobits is not None and np.isfinite(infobits) and infobits >= BAD_CALIBRATION_INFOBITS:
+        flags |= FLAG_BAD_CALIBRATION
+    seeing = row.get("seeing")  # arcsec
+    if seeing is not None and np.isfinite(seeing) and seeing > MAX_SEEING_ARCSEC:
+        flags |= FLAG_BAD_SEEING
+    return flags
+
+
+def _image_id(row: pd.Series) -> str:
+    return f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.3f}"
+
+
+def _skipped_result(row: pd.Series, band: str, flags: int) -> dict:
+    """A flagged, unmeasured epoch: kept in the lightcurve so the cut is visible."""
+    nan = float("nan")
+    infobits = row.get("infobits")
+    return dict(
+        flux=nan,
+        flux_err=nan,
+        mag=nan,
+        mag_err=nan,
+        chisq=nan,
+        flags=flags,
+        x_fit=nan,
+        y_fit=nan,
+        obsjd=float(row["obsjd"]),
+        zero_point=nan,
+        mag_limit=row.get("maglimit"),
+        image_id=_image_id(row),
+        band=band,
+        infobits=int(infobits) if infobits is not None and np.isfinite(infobits) else None,
+        seeing=row.get("seeing"),
+        scisigpix=nan,
+    )
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -148,6 +194,7 @@ def run_forced_photometry(
     force_recompute: bool = False,
     show_progress: bool = True,
     download_workers: int = 8,
+    measure_flagged: bool = False,
     _tqdm_position: int = 0,
     _tqdm_leave: bool = True,
     _download_executor: ThreadPoolExecutor | None = None,
@@ -174,6 +221,11 @@ def run_forced_photometry(
         show_progress: If ``True`` (default), display a tqdm progress bar.
         download_workers: Number of concurrent epoch downloads.  Ignored when
             a shared ``_download_executor`` is supplied by the batch wrapper.
+        measure_flagged: Epochs the archive metadata already marks as failing the
+            quality cuts (bad calibration, seeing > 4") are never detections or
+            stacked either way.  If ``False`` (default) they are not downloaded and
+            appear as flagged rows with NaN flux; if ``True`` they are downloaded and
+            measured too, for inspection.
 
     Returns:
         Dict mapping band label (``"g"``, ``"r"``, ``"i"``) to a
@@ -184,7 +236,7 @@ def run_forced_photometry(
     if config is None:
         config = build_config()
 
-    ck = _cache_key(config, max_epochs)
+    ck = _cache_key(config, max_epochs, measure_flagged)
     lightcurves: dict[str, Lightcurve] = {}
 
     # Serve what the cache can; everything else is fetched together below.
@@ -214,13 +266,28 @@ def run_forced_photometry(
     if max_epochs is not None:
         metadata = {band: df.tail(max_epochs).reset_index(drop=True) for band, df in metadata.items()}
 
+    # Quality cuts the metadata can decide.  Skipped epochs become flagged NaN rows.
+    pre_flags: dict[str, int] = {}
+    skipped: dict[str, list[dict]] = {band: [] for band in metadata}
+    to_download: dict[str, pd.DataFrame] = {}
+    for band, df in metadata.items():
+        keep = []
+        for _, row in df.iterrows():
+            flags = _metadata_flags(row)
+            pre_flags[_image_id(row)] = flags
+            if flags and not measure_flagged:
+                skipped[band].append(_skipped_result(row, band, flags))
+            else:
+                keep.append(row)
+        to_download[band] = pd.DataFrame(keep, columns=df.columns)
+
     # Use a shared executor supplied by the batch wrapper, or own one locally.
     _own_executor = _download_executor is None
     dl_exec = _download_executor or ThreadPoolExecutor(max_workers=download_workers)
 
     desc_base = f"({ra:.3f}, {dec:.3f})"
     bar = tqdm(
-        total=2 * sum(len(df) for df in metadata.values()),
+        total=2 * sum(len(df) for df in to_download.values()),
         desc=f"{desc_base} downloading",
         position=_tqdm_position,
         leave=_tqdm_leave,
@@ -236,7 +303,7 @@ def run_forced_photometry(
             # Download phase: every epoch of every band is submitted up front, so the
             # pool never idles between bands.  The pool is FIFO, so bands finish in
             # order and each is fitted and cached while the next is still downloading.
-            for band, df in metadata.items():
+            for band, df in to_download.items():
                 futures_by_band[band] = [
                     dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config) for _, row in df.iterrows()
                 ]
@@ -248,24 +315,27 @@ def run_forced_photometry(
                         image_triples.append(fut.result())
                     bar.update(1)
 
-                if not image_triples:
+                if not image_triples and not skipped[band]:
                     continue
 
                 # PSF photometry phase: sequential (CPU-fast, ~15 ms/epoch)
                 bar.set_description(f"{desc_base} [{band}] fitting PSF")
-                results = []
+                results = list(skipped[band])
                 for row, fits_p, psf_p in image_triples:
-                    image_id = (
-                        f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.3f}"
-                    )
+                    image_id = _image_id(row)
                     full_crpix = (
                         (float(row["crpix1"]), float(row["crpix2"])) if "crpix1" in row.index else None
                     )
-                    results.append(
-                        _process_one_epoch(
-                            str(fits_p), str(psf_p), ra, dec, band, image_id, config, full_crpix
-                        )
+                    res = _process_one_epoch(
+                        str(fits_p), str(psf_p), ra, dec, band, image_id, config, full_crpix
                     )
+                    # The header lacks the archive-only bad-calibration bit: apply the
+                    # metadata cuts and record the metadata infobits.
+                    res["flags"] |= pre_flags.get(image_id, 0)
+                    infobits = row.get("infobits")
+                    if infobits is not None and np.isfinite(infobits):
+                        res["infobits"] = int(infobits)
+                    results.append(res)
                     # Done with this epoch; don't hold every band's images on disk at once.
                     fits_p.unlink(missing_ok=True)
                     psf_p.unlink(missing_ok=True)
@@ -322,6 +392,7 @@ def run_forced_photometry_batch(
     n_workers: int = 4,
     download_workers: int = 8,
     show_progress: bool = True,
+    measure_flagged: bool = False,
 ) -> list[dict[str, Lightcurve]]:
     """Run forced photometry for a list of SkyCoord targets in parallel.
 
@@ -339,6 +410,7 @@ def run_forced_photometry_batch(
         download_workers: Total number of concurrent epoch downloads shared
             across all active source workers.
         show_progress: If ``True`` (default), display tqdm progress bars.
+        measure_flagged: See :func:`run_forced_photometry`.
 
     Returns:
         List of band → :class:`~ztforce.Lightcurve` dicts, one per target.
@@ -383,6 +455,7 @@ def run_forced_photometry_batch(
                     data_dir=data_dir,
                     config=config,
                     show_progress=show_progress,
+                    measure_flagged=measure_flagged,
                     _tqdm_position=pos,
                     _tqdm_leave=False,
                     _download_executor=dl_exec,

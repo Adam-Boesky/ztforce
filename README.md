@@ -60,6 +60,7 @@ lcs = run_forced_photometry(ra=210.08, dec=-6.88, bands=["g", "r"])
 
 lcs["g"].df              # pandas DataFrame of all epochs
 lcs["g"].stack()         # inverse-variance weighted stack of all good epochs
+lcs["g"].rolling_stack(window=30.0)  # 30-day stacks (window_unit="days" | "years" | "images")
 lcs["g"].save("my_source_g.ecsv")   # save to ECSV
 ```
 
@@ -77,11 +78,36 @@ results = run_forced_photometry_batch(targets, bands=["g", "r"], n_workers=4)
 results[0]["g"].stack()  # stacked photometry for first target, g-band
 ```
 
-### Quality cuts, stacking, and uncertainties
+### What each epoch holds
 
-Epochs failing the [ZFPS](https://irsa.ipac.caltech.edu/data/ZTF/docs/ztf_zfps_userguide.pdf) quality cuts (bad calibration, noisy image, seeing > 4″) are flagged and never counted as detections or stacked. Stacks follow the ZFPS recipe: all good epochs, rescaled to a common zero point, inverse-variance averaged, and reported as a 5σ upper limit below S/N 3.
+Every exposure whose footprint contains the target appears as a row, with its ZTF `field`, `ccdid` and `qid`:
 
-**Uncertainties are statistical only and so underestimated**, especially for bright sources (calibration/PSF systematics) and sources on extended hosts (the fit is on science images, not difference images).
+- `flux`, `flux_err`: instrumental flux (DN) on the epoch's `zero_point`, kept at any S/N.
+- `mag`, `mag_err`: AB magnitudes (ZTF calibration, zero colour, like ZTF's own catalogs), **only for detections** (S/N ≥ 3). A good non-detection has a 5σ `upper_limit` at the target instead.
+- `flags`: a bitmask, 0 = good. Flagged epochs are never detections or stacked:
+
+| Bit | Meaning |
+|---|---|
+| 1 | fit failed (target off the image or in a NaN region) |
+| 2 | image or PSF could not be read |
+| 4 | bad photometric calibration (archive `infobits` ≥ 2²⁵) |
+| 8 | noisy image (robust pixel noise > 25 DN) |
+| 16 | seeing > 4″ |
+| 32 | IRSA does not serve the file |
+| 64 | download kept failing (retried on the next run) |
+| 128 | saturated pixel under the PSF |
+
+Epochs the archive metadata already marks as bad (bits 4, 16) are not downloaded unless `measure_flagged=True`. Files IRSA does not serve (some exposures listed in its metadata have no files) are not re-requested unless `retry_unavailable=True`. A warning summarises epochs that could not be measured.
+
+### Stacking and uncertainties
+
+Quality cuts and stacking follow the [ZFPS user guide](https://irsa.ipac.caltech.edu/data/ZTF/docs/ztf_zfps_userguide.pdf): stacks combine all good epochs in flux, rescaled to a common zero point and inverse-variance averaged, and are reported as a 5σ upper limit below S/N 3.
+
+Uncertainties are statistical (sky + Poisson). They describe the scatter of faint and blank-sky measurements well, but omit calibration and PSF systematics, so they are **underestimated for bright sources** (ZTF's own catalogs carry a ~1% floor). The fit is on science images, not difference images, so light from an extended host can vary with seeing.
+
+### Caching
+
+Lightcurves are cached per position and band. A cached lightcurve does not pick up epochs taken after it was built; ztforce warns once it is over 30 days old, and `force_recompute=True` rebuilds it.
 
 ### Accuracy
 

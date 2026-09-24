@@ -311,13 +311,13 @@ def test_get_session_distinct_per_thread(mock_config):
     assert sessions[0] is not _get_session(mock_config)
 
 
-# ── query_sci_metadata ────────────────────────────────────────────────────────
+# ── query_sci_metadata_bands (single band) ────────────────────────────────────────────────────────
 
 
 def test_query_sci_metadata_raises_when_no_images(mock_config):
-    """query_sci_metadata raises NoImagesFoundError when the metadata search returns nothing."""
+    """query_sci_metadata_bands raises NoImagesFoundError when the metadata search returns nothing."""
     from ztforce.exceptions import NoImagesFoundError
-    from ztforce.ztf_images import query_sci_metadata
+    from ztforce.ztf_images import query_sci_metadata_bands
 
     fetch = mock.MagicMock(return_value=pd.DataFrame())
 
@@ -325,13 +325,13 @@ def test_query_sci_metadata_raises_when_no_images(mock_config):
         mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
         pytest.raises(NoImagesFoundError),
     ):
-        query_sci_metadata(_RA, _DEC, "g", mock_config)
+        query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)["g"]
 
 
 def test_query_sci_metadata_raises_when_none(mock_config):
-    """query_sci_metadata raises NoImagesFoundError when metatable is None."""
+    """query_sci_metadata_bands raises NoImagesFoundError when metatable is None."""
     from ztforce.exceptions import NoImagesFoundError
-    from ztforce.ztf_images import query_sci_metadata
+    from ztforce.ztf_images import query_sci_metadata_bands
 
     fetch = mock.MagicMock(return_value=None)
 
@@ -339,12 +339,12 @@ def test_query_sci_metadata_raises_when_none(mock_config):
         mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
         pytest.raises(NoImagesFoundError),
     ):
-        query_sci_metadata(_RA, _DEC, "g", mock_config)
+        query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)["g"]
 
 
 def test_query_sci_metadata_returns_sorted_df(mock_config):
-    """query_sci_metadata returns a DataFrame sorted by obsjd ascending."""
-    from ztforce.ztf_images import query_sci_metadata
+    """query_sci_metadata_bands returns a DataFrame sorted by obsjd ascending."""
+    from ztforce.ztf_images import query_sci_metadata_bands
 
     df = pd.DataFrame(
         [
@@ -355,7 +355,7 @@ def test_query_sci_metadata_returns_sorted_df(mock_config):
     fetch = mock.MagicMock(return_value=df)
 
     with mock.patch("ztforce.ztf_images._fetch_metadata", fetch):
-        result = query_sci_metadata(_RA, _DEC, "g", mock_config)
+        result = query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)["g"]
 
     assert list(result["obsjd"]) == [2459001.0, 2459002.0]
 

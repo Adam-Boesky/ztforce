@@ -26,3 +26,9 @@ FLAG_SATURATED = 128  # a pixel under the PSF is at or above the image's SATURAT
 BAD_CALIBRATION_INFOBITS = 2**25
 MAX_SCISIGPIX_DN = 25.0
 MAX_SEEING_ARCSEC = 4.0
+
+# Sky annulus for the forced fit, in pixels beyond the PSF radius: just outside the
+# region the PSF model covers, so the star's own wings are not taken as sky.  A closer
+# annulus (2-4 FWHM) biased blank-sky fluxes positive by ~0.4 sigma.
+SKY_ANNULUS_GAP_PX = 1
+SKY_ANNULUS_WIDTH_PX = 8

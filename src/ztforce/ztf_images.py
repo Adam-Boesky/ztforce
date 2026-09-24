@@ -100,20 +100,6 @@ def _fetch_metadata(url: str, config: ZTForceConfig) -> pd.DataFrame:
         resp.close()
 
 
-def query_sci_metadata(
-    ra: float,
-    dec: float,
-    band: str,
-    config: ZTForceConfig,
-) -> pd.DataFrame:
-    """Query ZTF IRSA for all science exposures covering (ra, dec) in *band*.
-
-    Returns a DataFrame sorted by obsjd ascending.
-    Raises NoImagesFoundError when no images are found.
-    """
-    return query_sci_metadata_bands(ra, dec, [band], config)[band]
-
-
 def build_sci_url(
     row: pd.Series,
     ra: float,

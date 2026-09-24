@@ -92,14 +92,6 @@ class ZTFImage:
         return self._config.default_gain
 
     @property
-    def fwhm(self) -> float:
-        """Median PSF FWHM in pixels from header."""
-        hdr = self.header
-        if "MEDFWHM" in hdr:
-            return float(hdr["MEDFWHM"])
-        return float(hdr["SEEING"])
-
-    @property
     def zero_point(self) -> float:
         """AB photometric zero-point from header (MAGZP).
 
@@ -186,14 +178,6 @@ class ZTFImage:
             return self.wcs.pixel_to_world(x, y)
         except Exception as exc:
             raise WCSError(f"pixel_to_sky failed: {exc}") from exc
-
-    def footprint(self) -> tuple[tuple[float, float], tuple[float, float]]:
-        """Return ((ra_min, ra_max), (dec_min, dec_max)) of the image footprint."""
-        ny, nx = self.data.shape
-        corners = [self.pixel_to_sky(x, y) for x, y in [(0, 0), (nx, 0), (nx, ny), (0, ny)]]
-        ras = [c.ra.deg for c in corners]
-        decs = [c.dec.deg for c in corners]
-        return (min(ras), max(ras)), (min(decs), max(decs))
 
     # ── masks ─────────────────────────────────────────────────────────────────
 

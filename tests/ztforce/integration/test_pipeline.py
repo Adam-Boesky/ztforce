@@ -17,7 +17,7 @@ from astropy.wcs import WCS
 
 
 def _make_metadata_row(field=468, ccdid=3, qid=2, obsjd=2459000.0):
-    """Return a one-row metadata DataFrame as query_sci_metadata would."""
+    """Return a one-row metadata DataFrame, like one band of query_sci_metadata_bands."""
     return pd.DataFrame(
         [
             {

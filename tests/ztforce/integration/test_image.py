@@ -36,13 +36,12 @@ def test_data_is_native_endian(synthetic_fits_file, mock_config):
 
 
 def test_scalar_properties(synthetic_fits_file, mock_config):
-    """gain, fwhm, zero_point, obs_jd, mag_limit are read from header."""
+    """gain, zero_point, obs_jd, mag_limit are read from header."""
     from ztforce.image import ZTFImage
 
     path, _, _ = synthetic_fits_file
     img = ZTFImage(str(path), "g", mock_config)
     assert img.gain == pytest.approx(6.2)
-    assert img.fwhm == pytest.approx(3.0)
     assert img.zero_point == pytest.approx(26.3)
     assert img.obs_jd == pytest.approx(2459000.0)
     assert img.mag_limit == pytest.approx(21.0)
@@ -63,24 +62,6 @@ def test_gain_fallback_default(tmp_path, mock_config):
 
     img = ZTFImage(str(path), "g", mock_config)
     assert img.gain == pytest.approx(mock_config.default_gain)
-
-
-def test_fwhm_falls_back_to_seeing(tmp_path, mock_config):
-    """fwhm uses SEEING when MEDFWHM is absent."""
-    from astropy.io import fits
-    from ztforce.image import ZTFImage
-
-    path = tmp_path / "seeing.fits"
-    hdr = fits.Header()
-    hdr["GAIN"] = 6.2
-    hdr["MAGZP"] = 26.3
-    hdr["OBSJD"] = 2459000.0
-    hdr["SEEING"] = 2.5
-    hdr["RADESYS"] = "ICRS"
-    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
-
-    img = ZTFImage(str(path), "g", mock_config)
-    assert img.fwhm == pytest.approx(2.5)
 
 
 def test_radecsys_rename(tmp_path, mock_config):
@@ -132,20 +113,6 @@ def test_nan_mask(synthetic_fits_file, mock_config):
     img = ZTFImage(str(path), "g", mock_config)
     # Synthetic image has no NaNs
     assert not img.nan_mask.any()
-
-
-def test_footprint_returns_ra_dec_bounds(synthetic_fits_file, mock_config):
-    """footprint() returns ((ra_min, ra_max), (dec_min, dec_max)) covering the image."""
-    from ztforce.image import ZTFImage
-
-    path, _, _ = synthetic_fits_file
-    img = ZTFImage(str(path), "g", mock_config)
-    (ra_min, ra_max), (dec_min, dec_max) = img.footprint()
-    assert ra_min < ra_max
-    assert dec_min < dec_max
-    # Synthetic image is centered near (150, 2), so bounds should straddle those coords
-    assert ra_min < 150.0 < ra_max
-    assert dec_min < 2.0 < dec_max
 
 
 def test_cutout_origin_from_crpix_without_ltv(synthetic_fits_file, mock_config):

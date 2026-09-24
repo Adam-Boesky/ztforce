@@ -9,16 +9,10 @@ from pathlib import Path
 import numpy as np
 from astropy.coordinates import SkyCoord
 
-from ._constants import FLAG_SATURATED
+from ._constants import FLAG_FIT_FAILED, FLAG_SATURATED, SKY_ANNULUS_GAP_PX, SKY_ANNULUS_WIDTH_PX
 from .exceptions import PSFBuildError, WCSError
 from .image import ZTFImage
 from .utils import annular_background, flux_to_ab_mag, has_nan_nearby
-
-# Annular sky background, in pixels beyond the PSF radius: just outside the region the
-# PSF model covers, so the star's own wings are not taken as sky.  A closer annulus
-# (2-4 FWHM) biased blank-sky fluxes positive by ~0.4 sigma.
-_SKY_ANNULUS_GAP_PX = 1
-_SKY_ANNULUS_WIDTH_PX = 8
 
 
 def parse_daophot_psf(psf_fpath: str | Path) -> dict:
@@ -194,7 +188,7 @@ def forced_phot_at_position(
 
     Returns a dict with keys ``flux``, ``flux_err``, ``mag``, ``mag_err``,
     ``chisq``, ``flags``, ``x_fit``, ``y_fit``.  ``chisq`` is the reduced chi-squared
-    of the fit over the PSF footprint.  ``flags=1`` means the position was too
+    of the fit over the PSF footprint.  ``FLAG_FIT_FAILED`` means the position was too
     close to the image edge or a NaN region.
     """
     nan_result = dict(
@@ -203,7 +197,7 @@ def forced_phot_at_position(
         mag=float("nan"),
         mag_err=float("nan"),
         chisq=float("nan"),
-        flags=1,
+        flags=FLAG_FIT_FAILED,
         x_fit=float("nan"),
         y_fit=float("nan"),
     )
@@ -217,8 +211,8 @@ def forced_phot_at_position(
     # Integer center pixel (cutout-local for array indexing)
     xi, yi = int(round(x0)), int(round(y0))
     half = psf_radius(parsed_psf)  # fit box: the region the PSF model covers
-    sky_inner = half + _SKY_ANNULUS_GAP_PX
-    sky_half = sky_inner + _SKY_ANNULUS_WIDTH_PX  # box holding the sky annulus
+    sky_inner = half + SKY_ANNULUS_GAP_PX
+    sky_half = sky_inner + SKY_ANNULUS_WIDTH_PX  # box holding the sky annulus
     ny, nx = image.data.shape
 
     # Reject if too close to edge

@@ -6,7 +6,6 @@ import hashlib
 import json
 import tempfile
 import time
-import traceback
 import warnings
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -29,13 +28,15 @@ from ._constants import (
     FLAG_UNAVAILABLE,
     MAX_SCISIGPIX_DN,
     MAX_SEEING_ARCSEC,
+    SKY_ANNULUS_GAP_PX,
+    SKY_ANNULUS_WIDTH_PX,
 )
 from .cache import lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError, ProductUnavailableError
 from .image import ZTFImage
 from .lightcurve import SNT, SNU, Lightcurve
-from .psf import _SKY_ANNULUS_GAP_PX, _SKY_ANNULUS_WIDTH_PX, forced_phot_at_position, parse_daophot_psf
+from .psf import forced_phot_at_position, parse_daophot_psf
 from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata_bands
 
 # ── Cache key ────────────────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ def _cache_key(config: ZTForceConfig, max_epochs: int | None, measure_flagged: b
         "bad_calibration_infobits": BAD_CALIBRATION_INFOBITS,
         "max_scisigpix_dn": MAX_SCISIGPIX_DN,
         "max_seeing_arcsec": MAX_SEEING_ARCSEC,
-        "sky_annulus_px": [_SKY_ANNULUS_GAP_PX, _SKY_ANNULUS_WIDTH_PX],
+        "sky_annulus_px": [SKY_ANNULUS_GAP_PX, SKY_ANNULUS_WIDTH_PX],
     }
     blob = json.dumps(params, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
@@ -154,7 +155,6 @@ def _process_one_epoch(
             image_id=image_id,
             band=band,
         )
-        traceback.print_exc()
     return result
 
 

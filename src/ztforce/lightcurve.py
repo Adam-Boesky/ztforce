@@ -328,6 +328,4 @@ class Lightcurve:
 
     def __repr__(self) -> str:
         """Short representation."""
-        return (
-            f"Lightcurve(ra={self.ra:.5f}, dec={self.dec:.5f}, " f"n_epochs={len(self)}, bands={self.bands})"
-        )
+        return f"Lightcurve(ra={self.ra:.5f}, dec={self.dec:.5f}, n_epochs={len(self)}, bands={self.bands})"

@@ -349,6 +349,40 @@ def test_rolling_stack_images_ivw_analytic():
     assert first["flux_err_stack"] == pytest.approx(expected_err * _K, rel=1e-6)
 
 
+@pytest.mark.parametrize(("n", "window", "step"), [(10, 4, None), (10, 5, None), (11, 4, 3), (7, 7, None)])
+def test_rolling_stack_images_exact_windows_cover_every_epoch(n, window, step):
+    """Every image window holds exactly `window` epochs, and together they cover all of them."""
+    lc = _make_lc()
+    for i in range(n):
+        _add_detection(lc, obsjd=2459000.0 + i)
+    result = lc.rolling_stack(window=window, window_unit="images", step=step)
+    assert (result["n_epochs"] == window).all()
+    # The newest epoch is in the last window: its IVW centre sits within the last `window` epochs.
+    assert result["obsjd_center"].max() > 2459000.0 + n - window
+
+
+def test_rolling_stack_images_skips_flagged_epochs():
+    """Flagged epochs neither enter nor use up an image window."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    for i in range(6):
+        _add_detection(lc, obsjd=2459000.0 + i)
+        mag, merr = flux_to_ab_mag(1000.0, _ZP, 50.0)
+        lc.add_epoch(2459000.5 + i, "g", 1000.0, 50.0, mag, merr, _ZP, flags=4)
+    result = lc.rolling_stack(window=3, window_unit="images", step=3)
+    assert list(result["n_epochs"]) == [3, 3]
+
+
+def test_rolling_stack_images_short_band_gives_one_window():
+    """A band with fewer good epochs than the window still gets a stack of all of them."""
+    lc = _make_lc()
+    for i in range(2):
+        _add_detection(lc, obsjd=2459000.0 + i)
+    result = lc.rolling_stack(window=5, window_unit="images")
+    assert list(result["n_epochs"]) == [2]
+
+
 def test_rolling_stack_obsjd_center_is_ivw_weighted_mean():
     """obsjd_center is the IVW-weighted mean JD of the window, not the arithmetic midpoint."""
     lc = _make_lc()

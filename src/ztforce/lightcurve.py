@@ -193,7 +193,8 @@ class Lightcurve:
         Args:
             window: Width of the rolling window in the units given by ``window_unit``.
             window_unit: ``'days'`` or ``'years'`` for time-based windows;
-                ``'images'`` for a fixed epoch count regardless of cadence.
+                ``'images'`` for exactly ``window`` good epochs per window, regardless
+                of cadence.
             bands: Bands to include (default: all present).
             step: Step between window centres in the same unit as ``window``.
                 Defaults to ``window / 2`` (50 % overlap).
@@ -235,15 +236,29 @@ class Lightcurve:
         return pd.DataFrame(records)
 
     def _rolling_stack_images(self, window: int, bands: list[str], step: int | None) -> pd.DataFrame:
+        """Stack consecutive runs of exactly ``window`` good epochs, stepping by ``step``.
+
+        Only good epochs (unflagged, finite flux, positive error) are counted.  The last
+        window always ends on the newest good epoch, so none is left out; a band with
+        ``window`` or fewer good epochs gives one window of all of them.
+        """
+        window = max(1, int(window))
         step = step or max(1, window // 2)
-        half = window // 2
         df = self.df
 
         records = []
         for band in bands:
-            lc = df[df["band"] == band].sort_values("obsjd").reset_index(drop=True)
-            for i in range(half, len(lc) - half, step):
-                rec = self._stack_window(band, lc.iloc[i - half : i + half + 1])
+            sub = df[df["band"] == band]
+            good = sub[(sub["flags"] == 0) & np.isfinite(sub["flux"]) & (sub["flux_err"] > 0)]
+            good = good.sort_values("obsjd").reset_index(drop=True)
+            n = len(good)
+            if n == 0:
+                continue
+            starts = list(range(0, max(n - window, 0) + 1, step))
+            if starts[-1] != max(n - window, 0):
+                starts.append(n - window)
+            for start in starts:
+                rec = self._stack_window(band, good.iloc[start : start + window])
                 if rec is not None:
                     records.append(rec)
         return pd.DataFrame(records)

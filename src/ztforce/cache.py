@@ -21,8 +21,12 @@ def make_cache(root: str | Path | None = None) -> CacheConfig:
 
 
 def lightcurve_path(cache: CacheConfig, ra: float, dec: float, band: str) -> Path:
-    """Path for a cached per-source lightcurve ECSV."""
-    coord_dir = f"{ra:.5f}_{dec:.5f}"
+    """Path for a cached per-source lightcurve ECSV.
+
+    Coordinates are rounded to 6 decimals (~0.004 arcsec), so distinct targets do not
+    share a file.
+    """
+    coord_dir = f"{ra:.6f}_{dec:.6f}"
     p = cache.root / "lightcurves" / coord_dir / f"{band}.ecsv"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p

@@ -315,15 +315,14 @@ def test_get_session_distinct_per_thread(mock_config):
 
 
 def test_query_sci_metadata_raises_when_no_images(mock_config):
-    """query_sci_metadata raises NoImagesFoundError when ZTFQuery returns empty."""
+    """query_sci_metadata raises NoImagesFoundError when the metadata search returns nothing."""
     from ztforce.exceptions import NoImagesFoundError
     from ztforce.ztf_images import query_sci_metadata
 
-    mock_zq = mock.MagicMock()
-    mock_zq.metatable = pd.DataFrame()
+    fetch = mock.MagicMock(return_value=pd.DataFrame())
 
     with (
-        mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq),
+        mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
         pytest.raises(NoImagesFoundError),
     ):
         query_sci_metadata(_RA, _DEC, "g", mock_config)
@@ -334,11 +333,10 @@ def test_query_sci_metadata_raises_when_none(mock_config):
     from ztforce.exceptions import NoImagesFoundError
     from ztforce.ztf_images import query_sci_metadata
 
-    mock_zq = mock.MagicMock()
-    mock_zq.metatable = None
+    fetch = mock.MagicMock(return_value=None)
 
     with (
-        mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq),
+        mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
         pytest.raises(NoImagesFoundError),
     ):
         query_sci_metadata(_RA, _DEC, "g", mock_config)
@@ -354,10 +352,9 @@ def test_query_sci_metadata_returns_sorted_df(mock_config):
             {"obsjd": 2459001.0, "field": 1, "ccdid": 1, "qid": 1, "filtercode": "zg", "filefracday": 1},
         ]
     )
-    mock_zq = mock.MagicMock()
-    mock_zq.metatable = df
+    fetch = mock.MagicMock(return_value=df)
 
-    with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq):
+    with mock.patch("ztforce.ztf_images._fetch_metadata", fetch):
         result = query_sci_metadata(_RA, _DEC, "g", mock_config)
 
     assert list(result["obsjd"]) == [2459001.0, 2459002.0]
@@ -379,15 +376,14 @@ def test_query_sci_metadata_bands_splits_by_band_in_one_query(mock_config):
     """One IRSA query covers all bands; rows are split per band and sorted by obsjd."""
     from ztforce.ztf_images import query_sci_metadata_bands
 
-    mock_zq = mock.MagicMock()
-    mock_zq.metatable = _metatable(("zr", 3.0), ("zg", 2.0), ("zg", 1.0), ("zi", 4.0))
+    fetch = mock.MagicMock(return_value=_metatable(("zr", 3.0), ("zg", 2.0), ("zg", 1.0), ("zi", 4.0)))
 
-    with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq) as ctor:
+    with mock.patch("ztforce.ztf_images._fetch_metadata", fetch):
         result = query_sci_metadata_bands(_RA, _DEC, ["g", "r", "i"], mock_config)
 
-    ctor.assert_called_once()
+    fetch.assert_called_once()
     # All three filters requested: no filter clause is sent at all.
-    assert mock_zq.load_metadata.call_args.kwargs["sql_query"] is None
+    assert "WHERE=&" in fetch.call_args.args[0]
     assert list(result) == ["g", "r", "i"]
     assert list(result["g"]["obsjd"]) == [1.0, 2.0]
     assert list(result["r"]["obsjd"]) == [3.0]
@@ -397,23 +393,21 @@ def test_query_sci_metadata_bands_subset_uses_in_clause(mock_config):
     """A subset of bands is filtered server-side with an IN clause."""
     from ztforce.ztf_images import query_sci_metadata_bands
 
-    mock_zq = mock.MagicMock()
-    mock_zq.metatable = _metatable(("zg", 1.0), ("zi", 2.0))
+    fetch = mock.MagicMock(return_value=_metatable(("zg", 1.0), ("zi", 2.0)))
 
-    with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq):
+    with mock.patch("ztforce.ztf_images._fetch_metadata", fetch):
         query_sci_metadata_bands(_RA, _DEC, ["g", "i"], mock_config)
 
-    assert mock_zq.load_metadata.call_args.kwargs["sql_query"] == "filtercode IN ('zg','zi')"
+    assert "WHERE=filtercode+IN+('zg','zi')" in fetch.call_args.args[0]
 
 
 def test_query_sci_metadata_bands_omits_empty_bands(mock_config):
     """Bands with no rows are left out of the result rather than returned empty."""
     from ztforce.ztf_images import query_sci_metadata_bands
 
-    mock_zq = mock.MagicMock()
-    mock_zq.metatable = _metatable(("zg", 1.0))
+    fetch = mock.MagicMock(return_value=_metatable(("zg", 1.0)))
 
-    with mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq):
+    with mock.patch("ztforce.ztf_images._fetch_metadata", fetch):
         result = query_sci_metadata_bands(_RA, _DEC, ["g", "i"], mock_config)
 
     assert list(result) == ["g"]
@@ -424,11 +418,25 @@ def test_query_sci_metadata_bands_raises_when_no_requested_band(mock_config):
     from ztforce.exceptions import NoImagesFoundError
     from ztforce.ztf_images import query_sci_metadata_bands
 
-    mock_zq = mock.MagicMock()
-    mock_zq.metatable = _metatable(("zr", 1.0))
+    fetch = mock.MagicMock(return_value=_metatable(("zr", 1.0)))
 
     with (
-        mock.patch("ztforce.ztf_images.zquery.ZTFQuery", return_value=mock_zq),
+        mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
         pytest.raises(NoImagesFoundError),
     ):
         query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)
+
+
+def test_fetch_metadata_uses_timeout(mock_config):
+    """The metadata search runs through the shared session with a timeout (ztfquery has none)."""
+    from ztforce.ztf_images import _METADATA_TIMEOUT_SEC, _fetch_metadata
+
+    resp = mock.MagicMock()
+    resp.text = "obsjd,field\n2459000.5,468\n"
+    session = _session(resp)
+    with mock.patch("ztforce.ztf_images._get_session", return_value=session):
+        df = _fetch_metadata("http://fake/search", mock_config)
+
+    assert session.get.call_args.kwargs["timeout"] == _METADATA_TIMEOUT_SEC
+    assert list(df.columns) == ["obsjd", "field"] and len(df) == 1
+    resp.close.assert_called_once()

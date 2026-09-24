@@ -23,6 +23,19 @@ def _nan_if_none(v: float | None) -> float:
     return float(v) if v is not None else float("nan")
 
 
+# Per-epoch columns, in the order add_epoch writes them.
+_EPOCH_COLUMNS = [
+    "obsjd", "band", "flux", "flux_err", "mag", "mag_err", "zero_point", "flags", "snr",
+    "detection", "upper_limit", "mag_limit", "x_fit", "y_fit", "image_id", "chisq",
+    "infobits", "seeing", "scisigpix",
+]  # fmt: skip
+# Columns of a stack record (stack() drops obsjd_center and indexes by band).
+_STACK_COLUMNS = [
+    "obsjd_center", "band", "flux_stack", "flux_err_stack", "snr_stack", "detection",
+    "mag_stack", "mag_err_stack", "upper_limit_stack", "n_epochs",
+]  # fmt: skip
+
+
 class Lightcurve:
     """Per-source forced-photometry lightcurve in absolute AB magnitudes.
 
@@ -107,6 +120,8 @@ class Lightcurve:
     @property
     def df(self) -> pd.DataFrame:
         """All epochs as a DataFrame, sorted by obsjd."""
+        if not self._rows:
+            return pd.DataFrame(columns=_EPOCH_COLUMNS)
         return pd.DataFrame(self._rows).sort_values("obsjd").reset_index(drop=True)
 
     @property
@@ -152,6 +167,8 @@ class Lightcurve:
             rec = self._stack_window(band, df[df["band"] == band])
             if rec is not None:
                 records.append(rec)
+        if not records:
+            return pd.DataFrame(columns=_STACK_COLUMNS[1:]).rename_axis("band")
         return pd.DataFrame(records).set_index("band").drop(columns="obsjd_center")
 
     def _stack_window(self, band: str, sub: pd.DataFrame) -> dict | None:
@@ -227,6 +244,8 @@ class Lightcurve:
         df = self.df
         # Windows are half-open, [c - half, c + half), so an epoch on a shared edge counts
         # once; add windows until the last one extends past the newest epoch.
+        if df.empty:
+            return pd.DataFrame(columns=_STACK_COLUMNS)
         half = window_days / 2
         jd_min, jd_max = df["obsjd"].min(), df["obsjd"].max()
         n_extra = max(int(np.floor((jd_max - jd_min - window_days) / step)) + 1, 0)
@@ -239,7 +258,7 @@ class Lightcurve:
                 rec = self._stack_window(band, sub[sub["band"] == band])
                 if rec is not None:
                     records.append(rec)
-        return pd.DataFrame(records)
+        return pd.DataFrame(records, columns=_STACK_COLUMNS)
 
     def _rolling_stack_images(self, window: int, bands: list[str], step: int | None) -> pd.DataFrame:
         """Stack consecutive runs of exactly ``window`` good epochs, stepping by ``step``.
@@ -267,7 +286,7 @@ class Lightcurve:
                 rec = self._stack_window(band, good.iloc[start : start + window])
                 if rec is not None:
                     records.append(rec)
-        return pd.DataFrame(records)
+        return pd.DataFrame(records, columns=_STACK_COLUMNS)
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
@@ -287,7 +306,11 @@ class Lightcurve:
         lc = cls(ra=float(t.meta["ra"]), dec=float(t.meta["dec"]))
         lc.cache_key = t.meta.get("cache_key", "")
         lc.queried_at = t.meta.get("queried_at", "")
-        lc._rows = t.to_pandas().to_dict("records")
+        df = t.to_pandas()
+        if "image_id" in df:
+            # An empty string round-trips through ECSV as a masked value; keep it text.
+            df["image_id"] = df["image_id"].fillna("").astype(str)
+        lc._rows = df.to_dict("records")
         return lc
 
     # ── Dunder ────────────────────────────────────────────────────────────────

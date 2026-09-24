@@ -531,3 +531,38 @@ def test_len_matches_epoch_count():
 
 
 # ── plot (smoke test) ─────────────────────────────────────────────────────────
+
+
+def test_stack_with_no_good_epochs_is_empty():
+    """stack() on a lightcurve whose epochs are all flagged returns an empty table, not an error."""
+    from ztforce.utils import flux_to_ab_mag
+
+    lc = _make_lc()
+    mag, merr = flux_to_ab_mag(1000.0, _ZP, 50.0)
+    lc.add_epoch(2459000.0, "g", 1000.0, 50.0, mag, merr, _ZP, flags=4)
+    result = lc.stack()
+    assert result.empty
+    assert "flux_stack" in result.columns
+
+
+def test_empty_lightcurve_stacks_saves_and_loads(tmp_path):
+    """An empty lightcurve stacks to empty tables and survives save/load."""
+    from ztforce.lightcurve import Lightcurve
+
+    lc = _make_lc()
+    assert lc.stack().empty
+    assert lc.rolling_stack(window=30.0).empty
+    path = tmp_path / "empty.ecsv"
+    lc.save(path)
+    assert len(Lightcurve.load(path)) == 0
+
+
+def test_empty_image_id_round_trips_as_text(tmp_path):
+    """An empty image_id comes back as an empty string, not NaN."""
+    from ztforce.lightcurve import Lightcurve
+
+    lc = _make_lc()
+    _add_detection(lc)  # no image_id given
+    path = tmp_path / "lc.ecsv"
+    lc.save(path)
+    assert Lightcurve.load(path).df.iloc[0]["image_id"] == ""

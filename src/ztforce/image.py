@@ -13,9 +13,6 @@ from ._constants import ZTF_QUADRANT_CRPIX
 from .config import ZTForceConfig
 from .exceptions import WCSError
 
-# e-/ADU per coadded frame for ZTF deep stacks (Bellm et al. 2019, PASP, 131, 018002)
-_ZTF_GAIN_PER_FRAME = 5.8
-
 
 class ZTFImage:
     """Lazy-loading wrapper around a single ZTF science FITS image."""
@@ -90,8 +87,8 @@ class ZTFImage:
         hdr = self.header
         if "GAIN" in hdr:
             return float(hdr["GAIN"])
-        if "NFRAMES" in hdr:
-            return _ZTF_GAIN_PER_FRAME * float(hdr["NFRAMES"])
+        # NFRAMES in science headers counts the raw file's extensions, not stacked
+        # frames, so it says nothing about the gain.
         return self._config.default_gain
 
     @property

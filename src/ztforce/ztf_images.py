@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import random
 import threading
 import time
@@ -11,8 +12,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from astropy.io import fits
-from ztfquery import buildurl
-from ztfquery import query as zquery
+from ztfquery import buildurl, metasearch
 
 from ._constants import DEFAULT_CUTOUT_SIZE_ARCMIN
 from .config import ZTForceConfig
@@ -20,6 +20,7 @@ from .exceptions import FITSDownloadError, NoImagesFoundError, ProductUnavailabl
 
 _IRSA_BASE = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products"
 _DOWNLOAD_TIMEOUT_SEC = 120
+_METADATA_TIMEOUT_SEC = 180  # the spatial search itself can take ~30 s
 _PERMANENT_HTTP_ERRORS = frozenset({401, 403, 404, 410})
 
 _BAND_TO_FILTERCODE = {"g": "zg", "r": "zr", "i": "zi"}
@@ -52,15 +53,12 @@ def query_sci_metadata_bands(
     last_exc: Exception | None = None
     for attempt in range(config.max_retries):
         try:
-            zq = zquery.ZTFQuery()
-            zq.load_metadata(
-                kind="sci",
-                radec=(ra, dec),
-                size=search_radius_deg,
-                sql_query=sql_query,
-                auth=(config.irsa_user, config.irsa_pass),
+            df = _fetch_metadata(
+                metasearch.build_query(
+                    kind="sci", radec=(ra, dec), size=search_radius_deg, sql_query=sql_query, ct="csv"
+                ),
+                config,
             )
-            df = zq.metatable
             if df is None or df.empty:
                 raise NoImagesFoundError(f"No {desc} science images found at ({ra:.5f}, {dec:.5f}).")
             if not _REQUIRED_METADATA_COLS.issubset(df.columns):
@@ -88,6 +86,21 @@ def query_sci_metadata_bands(
         f"IRSA metadata query failed after {config.max_retries} attempts "
         f"for {desc} at ({ra:.5f}, {dec:.5f}): {last_exc}"
     )
+
+
+def _fetch_metadata(url: str, config: ZTForceConfig) -> pd.DataFrame:
+    """Run an IBE metadata search (URL from ztfquery) with a timeout.
+
+    Same query and table as ``ztfquery``'s ``load_metadata``, but through the shared
+    session and with a timeout, so a stalled connection fails and is retried instead
+    of hanging the worker.
+    """
+    resp = _get_session(config).get(url, timeout=_METADATA_TIMEOUT_SEC)
+    try:
+        resp.raise_for_status()
+        return pd.read_csv(io.StringIO(resp.text))
+    finally:
+        resp.close()
 
 
 def query_sci_metadata(

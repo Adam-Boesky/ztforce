@@ -48,24 +48,6 @@ def test_scalar_properties(synthetic_fits_file, mock_config):
     assert img.mag_limit == pytest.approx(21.0)
 
 
-def test_gain_fallback_nframes(tmp_path, mock_config):
-    """gain falls back to 5.8 * NFRAMES when GAIN header is absent."""
-    from astropy.io import fits
-    from ztforce.image import ZTFImage
-
-    path = tmp_path / "nframes.fits"
-    hdr = fits.Header()
-    hdr["NFRAMES"] = 3
-    hdr["MAGZP"] = 26.3
-    hdr["OBSJD"] = 2459000.0
-    hdr["MEDFWHM"] = 3.0
-    hdr["RADESYS"] = "ICRS"
-    fits.writeto(str(path), np.zeros((64, 64), dtype=np.float32), hdr)
-
-    img = ZTFImage(str(path), "g", mock_config)
-    assert img.gain == pytest.approx(5.8 * 3)
-
-
 def test_gain_fallback_default(tmp_path, mock_config):
     """gain falls back to config.default_gain when no GAIN or NFRAMES header."""
     from astropy.io import fits
@@ -285,3 +267,15 @@ def test_radecsys_both_keywords_deletes_duplicate(tmp_path, mock_config):
     img = ZTFImage(str(path), "g", mock_config)
     assert "RADECSYS" not in img.header
     assert img.wcs is not None
+
+
+def test_gain_falls_back_to_config_default_not_nframes(tmp_path, mock_config):
+    """Without GAIN, the configured default is used; NFRAMES (raw extension count) is ignored."""
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+
+    path = tmp_path / "nogain.fits"
+    hdr = fits.Header()
+    hdr["NFRAMES"] = 8
+    fits.writeto(path, np.zeros((4, 4), dtype=np.float32), hdr)
+    assert ZTFImage(str(path), "g", mock_config).gain == mock_config.default_gain

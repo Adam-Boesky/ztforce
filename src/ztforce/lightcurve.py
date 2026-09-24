@@ -27,7 +27,7 @@ def _nan_if_none(v: float | None) -> float:
 _EPOCH_COLUMNS = [
     "obsjd", "band", "flux", "flux_err", "mag", "mag_err", "zero_point", "flags", "snr",
     "detection", "upper_limit", "mag_limit", "x_fit", "y_fit", "image_id", "chisq",
-    "infobits", "seeing", "scisigpix",
+    "infobits", "seeing", "scisigpix", "field", "ccdid", "qid",
 ]  # fmt: skip
 # Columns of a stack record (stack() drops obsjd_center and indexes by band).
 _STACK_COLUMNS = [
@@ -74,6 +74,9 @@ class Lightcurve:
         infobits: int | None = None,
         seeing: float | None = None,
         scisigpix: float | None = None,
+        field: int | None = None,
+        ccdid: int | None = None,
+        qid: int | None = None,
     ) -> None:
         """Append one exposure's measurement.
 
@@ -114,6 +117,10 @@ class Lightcurve:
                 infobits=infobits if infobits is not None else -1,
                 seeing=_nan_if_none(seeing),
                 scisigpix=_nan_if_none(scisigpix),
+                # ZTF field / CCD / quadrant the epoch was measured on (-1 if unknown)
+                field=field if field is not None else -1,
+                ccdid=ccdid if ccdid is not None else -1,
+                qid=qid if qid is not None else -1,
             )
         )
 

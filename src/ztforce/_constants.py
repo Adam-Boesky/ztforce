@@ -1,6 +1,6 @@
 # Bump when the photometry algorithm changes in a way that makes existing
 # cached lightcurves stale (e.g. new background estimator, PSF fitting change).
-_PHOTOMETRY_VERSION = "6"
+_PHOTOMETRY_VERSION = "7"
 
 # CRPIX of a full ZTF CCD-quadrant science image (archive metadata crpix1/crpix2).
 # IBE cutouts carry no LTV keywords; they shift CRPIX instead, so a cutout's offset

@@ -186,6 +186,11 @@ def _metadata_flags(row: pd.Series) -> int:
     return flags
 
 
+def _group(row: pd.Series) -> dict[str, int]:
+    """The ZTF field / CCD / quadrant of a metadata row."""
+    return dict(field=int(row["field"]), ccdid=int(row["ccdid"]), qid=int(row["qid"]))
+
+
 def _image_id(row: pd.Series) -> str:
     """``field-ccdid-qid-obsjd``, with obsjd to 1e-5 d (0.9 s) so back-to-back exposures differ."""
     return f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.5f}"
@@ -212,6 +217,7 @@ def _unmeasured_result(row: pd.Series, band: str, flags: int) -> dict:
         infobits=int(infobits) if infobits is not None and np.isfinite(infobits) else None,
         seeing=row.get("seeing"),
         scisigpix=nan,
+        **_group(row),
     )
 
 
@@ -406,6 +412,7 @@ def run_forced_photometry(
                     infobits = row.get("infobits")
                     if infobits is not None and np.isfinite(infobits):
                         res["infobits"] = int(infobits)
+                    res.update(_group(row))
                     if not np.isfinite(res.get("obsjd", np.nan)):
                         # The image could not be read: keep the epoch, dated from metadata.
                         res["obsjd"] = float(row["obsjd"])
@@ -442,6 +449,9 @@ def run_forced_photometry(
                         infobits=res.get("infobits"),
                         seeing=res.get("seeing"),
                         scisigpix=res.get("scisigpix"),
+                        field=res.get("field"),
+                        ccdid=res.get("ccdid"),
+                        qid=res.get("qid"),
                     )
 
                 lc.cache_key = ck

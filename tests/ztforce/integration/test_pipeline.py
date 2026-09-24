@@ -602,6 +602,7 @@ def test_skip_mode_does_not_download_flagged_epoch(tmp_path, mock_config):
     assert len(df) == 2
     bad = df[df["obsjd"] == 2459001.0].iloc[0]
     assert bad["flags"] & 4
+    assert (bad["field"], bad["ccdid"], bad["qid"]) == (468, 3, 2)  # unmeasured rows too
     assert np.isnan(bad["flux"])
     assert bad["infobits"] == 2**25
     assert not bad["detection"]
@@ -806,6 +807,7 @@ def test_back_to_back_exposures_are_measured_from_their_own_files(tmp_path, mock
         )
 
     df = result["g"].df
+    assert (df[["field", "ccdid", "qid"]].to_numpy() == [468, 3, 2]).all()  # group columns
     assert df["image_id"].nunique() == 2
     assert sorted(df["flux"]) == [20200601000000.0, 20200601000460.0]
     assert (df["flags"] == 0).all()

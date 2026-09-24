@@ -38,6 +38,8 @@ class Lightcurve:
         self.dec = dec
         self._rows: list[dict] = []
         self.cache_key: str = ""
+        # When the archive metadata behind these epochs was queried (ISO 8601, UTC).
+        self.queried_at: str = ""
 
     # ── I/O ──────────────────────────────────────────────────────────────────
 
@@ -271,6 +273,7 @@ class Lightcurve:
         t.meta["ra"] = self.ra
         t.meta["dec"] = self.dec
         t.meta["cache_key"] = self.cache_key
+        t.meta["queried_at"] = self.queried_at
         t.write(str(path), format="ascii.ecsv", overwrite=True)
 
     @classmethod
@@ -279,6 +282,7 @@ class Lightcurve:
         t = Table.read(str(path), format="ascii.ecsv")
         lc = cls(ra=float(t.meta["ra"]), dec=float(t.meta["dec"]))
         lc.cache_key = t.meta.get("cache_key", "")
+        lc.queried_at = t.meta.get("queried_at", "")
         lc._rows = t.to_pandas().to_dict("records")
         return lc
 

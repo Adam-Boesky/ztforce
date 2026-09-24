@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import time
 import traceback
 import warnings
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -32,8 +34,8 @@ from .cache import lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError, ProductUnavailableError
 from .image import ZTFImage
-from .lightcurve import Lightcurve
-from .psf import forced_phot_at_position, parse_daophot_psf
+from .lightcurve import SNT, SNU, Lightcurve
+from .psf import _SKY_ANNULUS_GAP_PX, _SKY_ANNULUS_WIDTH_PX, forced_phot_at_position, parse_daophot_psf
 from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata_bands
 
 # ── Cache key ────────────────────────────────────────────────────────────────
@@ -47,9 +49,34 @@ def _cache_key(config: ZTForceConfig, max_epochs: int | None, measure_flagged: b
         "default_gain": config.default_gain,
         "max_epochs": max_epochs,
         "measure_flagged": measure_flagged,
+        # Stored per-epoch results (detection, upper_limit, flags) depend on these.
+        "snt": SNT,
+        "snu": SNU,
+        "bad_calibration_infobits": BAD_CALIBRATION_INFOBITS,
+        "max_scisigpix_dn": MAX_SCISIGPIX_DN,
+        "max_seeing_arcsec": MAX_SEEING_ARCSEC,
+        "sky_annulus_px": [_SKY_ANNULUS_GAP_PX, _SKY_ANNULUS_WIDTH_PX],
     }
     blob = json.dumps(params, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
+
+
+# A cached lightcurve never picks up epochs taken after its metadata query; warn
+# once it is this old.
+CACHE_STALE_DAYS = 30
+
+
+def _warn_if_stale(lc: Lightcurve, path: Path, ra: float, dec: float, band: str) -> None:
+    """Warn when a cached lightcurve's archive query is older than CACHE_STALE_DAYS."""
+    # Caches written before queried_at was recorded fall back to the file's mtime.
+    queried = datetime.fromisoformat(lc.queried_at).timestamp() if lc.queried_at else path.stat().st_mtime
+    age_days = (time.time() - queried) / 86400
+    if age_days > CACHE_STALE_DAYS:
+        warnings.warn(
+            f"({ra:.5f}, {dec:.5f}) [{band}]: cached lightcurve is {age_days:.0f} days old and "
+            "misses any newer epochs; pass force_recompute=True to refresh it.",
+            stacklevel=3,
+        )
 
 
 # ── Per-epoch workers ────────────────────────────────────────────────────────
@@ -261,6 +288,7 @@ def run_forced_photometry(
             lc = Lightcurve.load(lc_fpath)
             if lc.cache_key == ck:
                 ids = {r["image_id"] for r in lc._rows if int(r["flags"]) & retry_bits}
+                _warn_if_stale(lc, lc_fpath, ra, dec, band)
                 if not ids:
                     if show_progress:
                         tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
@@ -279,6 +307,7 @@ def run_forced_photometry(
         metadata = query_sci_metadata_bands(ra, dec, todo, config)
     except NoImagesFoundError:
         return {**lightcurves, **cached}
+    queried_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     if max_epochs is not None:
         metadata = {band: df.tail(max_epochs).reset_index(drop=True) for band, df in metadata.items()}
@@ -410,6 +439,8 @@ def run_forced_photometry(
                     )
 
                 lc.cache_key = ck
+                # A retry run adds no new epochs, so the cached query time still holds.
+                lc.queried_at = cached[band].queried_at if band in cached else queried_at
                 lc.save(lightcurve_path(cache, ra, dec, band))
                 lightcurves[band] = lc
 

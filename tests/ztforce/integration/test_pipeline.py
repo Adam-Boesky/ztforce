@@ -771,6 +771,73 @@ def test_processing_error_epoch_is_kept(tmp_path, mock_config):
     assert row["flags"] & 2
 
 
+# ── cache key and staleness ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "name", ["SNT", "SNU", "BAD_CALIBRATION_INFOBITS", "MAX_SCISIGPIX_DN", "MAX_SEEING_ARCSEC"]
+)
+def test_cache_key_changes_with_stored_result_settings(monkeypatch, mock_config, name):
+    """Thresholds baked into stored detections, limits and flags invalidate the cache."""
+    import ztforce.pipeline as pipeline
+
+    before = pipeline._cache_key(mock_config, None)
+    monkeypatch.setattr(pipeline, name, getattr(pipeline, name) * 2)
+    assert pipeline._cache_key(mock_config, None) != before
+
+
+def _write_cached(tmp_path, mock_config, queried_at):
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.lightcurve import Lightcurve
+    from ztforce.pipeline import _cache_key
+
+    lc = Lightcurve(ra=150.0, dec=2.0)
+    lc.cache_key = _cache_key(mock_config, None)
+    lc.queried_at = queried_at
+    lc.add_epoch(2459000.0, "g", 1000.0, 50.0, 18.8, 0.05, 26.3, 0)
+    lc.save(lightcurve_path(make_cache(tmp_path / "cache"), 150.0, 2.0, "g"))
+
+
+def _load_cached(tmp_path, mock_config):
+    from ztforce.pipeline import run_forced_photometry
+
+    return run_forced_photometry(
+        150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
+    )
+
+
+def test_old_cache_warns(tmp_path, mock_config):
+    """A cached lightcurve queried over a month ago warns that it misses newer epochs."""
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(timespec="seconds")
+    _write_cached(tmp_path, mock_config, old)
+    with pytest.warns(UserWarning, match="45 days old"):
+        result = _load_cached(tmp_path, mock_config)
+    assert len(result["g"]) == 1
+
+
+def test_fresh_cache_does_not_warn(tmp_path, mock_config):
+    """A recently queried cache loads silently."""
+    from datetime import datetime, timezone
+
+    _write_cached(tmp_path, mock_config, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _load_cached(tmp_path, mock_config)
+
+
+def test_new_lightcurve_records_query_time(tmp_path, mock_config):
+    """A freshly computed lightcurve stores when its metadata was queried, and it round-trips."""
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.lightcurve import Lightcurve
+
+    result, _ = _run_downloads(tmp_path, mock_config, _three_epochs(), _downloads())
+    assert result["g"].queried_at
+    saved = Lightcurve.load(lightcurve_path(make_cache(tmp_path / "cache"), 150.0, 2.0, "g"))
+    assert saved.queried_at == result["g"].queried_at
+
+
 # ── run_forced_photometry_batch ───────────────────────────────────────────────
 
 

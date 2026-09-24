@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
-import math
 import tempfile
 import traceback
+import warnings
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
@@ -22,14 +21,16 @@ from ._constants import (
     BAD_CALIBRATION_INFOBITS,
     FLAG_BAD_CALIBRATION,
     FLAG_BAD_SEEING,
+    FLAG_DOWNLOAD_FAILED,
     FLAG_NOISY_IMAGE,
     FLAG_PROCESSING_ERROR,
+    FLAG_UNAVAILABLE,
     MAX_SCISIGPIX_DN,
     MAX_SEEING_ARCSEC,
 )
 from .cache import lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
-from .exceptions import NoImagesFoundError
+from .exceptions import NoImagesFoundError, ProductUnavailableError
 from .image import ZTFImage
 from .lightcurve import Lightcurve
 from .psf import forced_phot_at_position, parse_daophot_psf
@@ -157,8 +158,8 @@ def _image_id(row: pd.Series) -> str:
     return f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.3f}"
 
 
-def _skipped_result(row: pd.Series, band: str, flags: int) -> dict:
-    """A flagged, unmeasured epoch: kept in the lightcurve so the cut is visible."""
+def _unmeasured_result(row: pd.Series, band: str, flags: int) -> dict:
+    """A flagged epoch with no measurement (cut, unavailable, or failed), kept as a row."""
     nan = float("nan")
     infobits = row.get("infobits")
     return dict(
@@ -195,6 +196,7 @@ def run_forced_photometry(
     show_progress: bool = True,
     download_workers: int = 8,
     measure_flagged: bool = False,
+    retry_unavailable: bool = False,
     _tqdm_position: int = 0,
     _tqdm_leave: bool = True,
     _download_executor: ThreadPoolExecutor | None = None,
@@ -226,6 +228,14 @@ def run_forced_photometry(
             stacked either way.  If ``False`` (default) they are not downloaded and
             appear as flagged rows with NaN flux; if ``True`` they are downloaded and
             measured too, for inspection.
+        retry_unavailable: Epochs whose files IRSA does not serve (``FLAG_UNAVAILABLE``)
+            are not re-requested on later runs unless this is ``True``.  Epochs whose
+            download failed transiently (``FLAG_DOWNLOAD_FAILED``) always are, reusing
+            the rest of the cached lightcurve.
+
+    Every epoch in the archive metadata appears as a row; ones that could not be
+    measured carry a flag and NaN flux.  A warning summarises unavailable and failed
+    epochs.
 
     Returns:
         Dict mapping band label (``"g"``, ``"r"``, ``"i"``) to a
@@ -239,18 +249,25 @@ def run_forced_photometry(
     ck = _cache_key(config, max_epochs, measure_flagged)
     lightcurves: dict[str, Lightcurve] = {}
 
-    # Serve what the cache can; everything else is fetched together below.
+    # Serve what the cache can; everything else is fetched together below.  A cached
+    # band with epochs to retry is reused and only those epochs are fetched again.
+    retry_bits = FLAG_DOWNLOAD_FAILED | (FLAG_UNAVAILABLE if retry_unavailable else 0)
     todo: list[str] = []
+    cached: dict[str, Lightcurve] = {}
+    retry_ids: dict[str, set[str]] = {}
     for band in bands:
         lc_fpath = lightcurve_path(cache, ra, dec, band)
         if lc_fpath.exists() and not force_recompute:
             lc = Lightcurve.load(lc_fpath)
             if lc.cache_key == ck:
-                if show_progress:
-                    tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
-                lightcurves[band] = lc
-                continue
-            # stale cache (settings changed) — fall through and recompute
+                ids = {r["image_id"] for r in lc._rows if int(r["flags"]) & retry_bits}
+                if not ids:
+                    if show_progress:
+                        tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
+                    lightcurves[band] = lc
+                    continue
+                cached[band], retry_ids[band] = lc, ids
+            # otherwise stale cache (settings changed) — fall through and recompute
         todo.append(band)
 
     if not todo:
@@ -261,10 +278,16 @@ def run_forced_photometry(
     try:
         metadata = query_sci_metadata_bands(ra, dec, todo, config)
     except NoImagesFoundError:
-        return lightcurves
+        return {**lightcurves, **cached}
 
     if max_epochs is not None:
         metadata = {band: df.tail(max_epochs).reset_index(drop=True) for band, df in metadata.items()}
+    for band, ids in retry_ids.items():
+        if band not in metadata:
+            lightcurves[band] = cached.pop(band)
+            continue
+        df = metadata[band]
+        metadata[band] = df[[_image_id(row) in ids for _, row in df.iterrows()]].reset_index(drop=True)
 
     # Quality cuts the metadata can decide.  Skipped epochs become flagged NaN rows.
     pre_flags: dict[str, int] = {}
@@ -276,7 +299,7 @@ def run_forced_photometry(
             flags = _metadata_flags(row)
             pre_flags[_image_id(row)] = flags
             if flags and not measure_flagged:
-                skipped[band].append(_skipped_result(row, band, flags))
+                skipped[band].append(_unmeasured_result(row, band, flags))
             else:
                 keep.append(row)
         to_download[band] = pd.DataFrame(keep, columns=df.columns)
@@ -294,7 +317,8 @@ def run_forced_photometry(
         disable=not show_progress,
         unit="step",
     )
-    futures_by_band: dict[str, list[Future]] = {}
+    futures_by_band: dict[str, dict[Future, pd.Series]] = {}
+    unmeasured_counts = {"unavailable": 0, "failed": 0, "processing error": 0}
 
     try:
         with tempfile.TemporaryDirectory() as _tmp:
@@ -304,23 +328,35 @@ def run_forced_photometry(
             # pool never idles between bands.  The pool is FIFO, so bands finish in
             # order and each is fitted and cached while the next is still downloading.
             for band, df in to_download.items():
-                futures_by_band[band] = [
-                    dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config) for _, row in df.iterrows()
-                ]
+                futures_by_band[band] = {
+                    dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config): row
+                    for _, row in df.iterrows()
+                }
 
             for band, futures in futures_by_band.items():
                 image_triples: list[tuple[pd.Series, Path, Path]] = []
+                results = list(skipped[band])
                 for fut in as_completed(futures):
-                    with contextlib.suppress(Exception):
+                    row = futures[fut]
+                    try:
                         image_triples.append(fut.result())
+                    except ProductUnavailableError:
+                        flags = FLAG_UNAVAILABLE | pre_flags.get(_image_id(row), 0)
+                        results.append(_unmeasured_result(row, band, flags))
+                        unmeasured_counts["unavailable"] += 1
+                        bar.update(1)
+                    except Exception:
+                        flags = FLAG_DOWNLOAD_FAILED | pre_flags.get(_image_id(row), 0)
+                        results.append(_unmeasured_result(row, band, flags))
+                        unmeasured_counts["failed"] += 1
+                        bar.update(1)
                     bar.update(1)
 
-                if not image_triples and not skipped[band]:
+                if not results and not image_triples and band not in cached:
                     continue
 
                 # PSF photometry phase: sequential (CPU-fast, ~15 ms/epoch)
                 bar.set_description(f"{desc_base} [{band}] fitting PSF")
-                results = list(skipped[band])
                 for row, fits_p, psf_p in image_triples:
                     image_id = _image_id(row)
                     full_crpix = (
@@ -335,6 +371,11 @@ def run_forced_photometry(
                     infobits = row.get("infobits")
                     if infobits is not None and np.isfinite(infobits):
                         res["infobits"] = int(infobits)
+                    if not np.isfinite(res.get("obsjd", np.nan)):
+                        # The image could not be read: keep the epoch, dated from metadata.
+                        res["obsjd"] = float(row["obsjd"])
+                        res.setdefault("seeing", row.get("seeing"))
+                        unmeasured_counts["processing error"] += 1
                     results.append(res)
                     # Done with this epoch; don't hold every band's images on disk at once.
                     fits_p.unlink(missing_ok=True)
@@ -344,11 +385,11 @@ def run_forced_photometry(
 
                 results.sort(key=lambda d: d.get("obsjd", 0))
 
-                # Assemble lightcurve
+                # Assemble lightcurve: cached rows kept as they were, plus this run's.
                 lc = Lightcurve(ra=ra, dec=dec)
+                if band in cached:
+                    lc._rows = [r for r in cached[band]._rows if r["image_id"] not in retry_ids[band]]
                 for res in results:
-                    if not res.get("obsjd") or math.isnan(res.get("obsjd", float("nan"))):
-                        continue
                     lc.add_epoch(
                         obsjd=res["obsjd"],
                         band=band,
@@ -381,6 +422,13 @@ def run_forced_photometry(
         if _own_executor:
             dl_exec.shutdown(wait=False)
 
+    if any(unmeasured_counts.values()):
+        detail = ", ".join(f"{n} {what}" for what, n in unmeasured_counts.items() if n)
+        warnings.warn(
+            f"({ra:.5f}, {dec:.5f}): epochs not measured: {detail}. They are kept as flagged "
+            "rows; failed downloads are retried on the next run.",
+            stacklevel=2,
+        )
     return lightcurves
 
 
@@ -393,6 +441,7 @@ def run_forced_photometry_batch(
     download_workers: int = 8,
     show_progress: bool = True,
     measure_flagged: bool = False,
+    retry_unavailable: bool = False,
 ) -> list[dict[str, Lightcurve]]:
     """Run forced photometry for a list of SkyCoord targets in parallel.
 
@@ -411,6 +460,7 @@ def run_forced_photometry_batch(
             across all active source workers.
         show_progress: If ``True`` (default), display tqdm progress bars.
         measure_flagged: See :func:`run_forced_photometry`.
+        retry_unavailable: See :func:`run_forced_photometry`.
 
     Returns:
         List of band → :class:`~ztforce.Lightcurve` dicts, one per target.
@@ -456,6 +506,7 @@ def run_forced_photometry_batch(
                     config=config,
                     show_progress=show_progress,
                     measure_flagged=measure_flagged,
+                    retry_unavailable=retry_unavailable,
                     _tqdm_position=pos,
                     _tqdm_leave=False,
                     _download_executor=dl_exec,

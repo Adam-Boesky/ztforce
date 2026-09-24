@@ -245,6 +245,47 @@ def test_download_with_retry_closes_response_on_bad_status(tmp_path, mock_config
     resp.close.assert_called_once()
 
 
+def test_download_with_retry_does_not_retry_missing_file(tmp_path, mock_config):
+    """A 404 raises ProductUnavailableError after one request, without backoff."""
+    from ztforce.exceptions import ProductUnavailableError
+    from ztforce.ztf_images import _download_with_retry
+
+    resp = mock.MagicMock()
+    resp.status_code = 404
+    session = _session(resp)
+    with (
+        mock.patch("ztforce.ztf_images._get_session", return_value=session),
+        mock.patch("ztforce.ztf_images.time.sleep") as sleep,
+        pytest.raises(ProductUnavailableError) as exc,
+    ):
+        _download_with_retry("http://fake/url", tmp_path / "x.fits", mock_config)
+
+    assert exc.value.status == 404
+    assert session.get.call_count == 1
+    sleep.assert_not_called()
+
+
+def test_download_with_retry_retries_server_errors(tmp_path, mock_config):
+    """A 5xx is transient: retried up to max_retries, then FITSDownloadError (not unavailable)."""
+    from ztforce.exceptions import FITSDownloadError, ProductUnavailableError
+    from ztforce.ztf_images import _download_with_retry
+
+    mock_config.max_retries = 3
+    resp = mock.MagicMock()
+    resp.status_code = 503
+    resp.raise_for_status.side_effect = Exception("503 Service Unavailable")
+    session = _session(resp)
+    with (
+        mock.patch("ztforce.ztf_images._get_session", return_value=session),
+        mock.patch("ztforce.ztf_images.time.sleep"),
+        pytest.raises(FITSDownloadError) as exc,
+    ):
+        _download_with_retry("http://fake/url", tmp_path / "x.fits", mock_config)
+
+    assert not isinstance(exc.value, ProductUnavailableError)
+    assert session.get.call_count == 3
+
+
 # ── _get_session ──────────────────────────────────────────────────────────────
 
 

@@ -16,10 +16,11 @@ from ztfquery import query as zquery
 
 from ._constants import DEFAULT_CUTOUT_SIZE_ARCMIN
 from .config import ZTForceConfig
-from .exceptions import FITSDownloadError, NoImagesFoundError
+from .exceptions import FITSDownloadError, NoImagesFoundError, ProductUnavailableError
 
 _IRSA_BASE = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products"
 _DOWNLOAD_TIMEOUT_SEC = 120
+_PERMANENT_HTTP_ERRORS = frozenset({401, 403, 404, 410})
 
 _BAND_TO_FILTERCODE = {"g": "zg", "r": "zr", "i": "zi"}
 _REQUIRED_METADATA_COLS = {"obsjd", "field", "ccdid", "qid", "filtercode", "filefracday"}
@@ -178,11 +179,18 @@ def _download_with_retry(
     config: ZTForceConfig,
     validate: bool = True,
 ) -> Path:
-    """Download *url* to *dest*, retrying on failure with exponential backoff."""
+    """Download *url* to *dest*, retrying on failure with exponential backoff.
+
+    Raises :class:`ProductUnavailableError` at once, without retrying, when IRSA says
+    the file is not there or not ours to read (401/403/404/410): IRSA's metadata lists
+    some exposures whose files its server does not hold.
+    """
     for attempt in range(config.max_retries):
         try:
             resp = _get_session(config).get(url, timeout=_DOWNLOAD_TIMEOUT_SEC)
             try:
+                if resp.status_code in _PERMANENT_HTTP_ERRORS:
+                    raise ProductUnavailableError(url, resp.status_code)
                 resp.raise_for_status()
                 dest.write_bytes(resp.content)
             finally:
@@ -191,6 +199,8 @@ def _download_with_retry(
             if not validate or _validate_fits(dest):
                 return dest
             dest.unlink(missing_ok=True)
+        except ProductUnavailableError:
+            raise
         except Exception:
             pass
         delay = config.retry_base_delay * (2**attempt) + random.uniform(0, config.retry_jitter)

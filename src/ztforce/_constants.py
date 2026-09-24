@@ -18,6 +18,9 @@ FLAG_PROCESSING_ERROR = 2  # the image or PSF could not be read or fitted
 FLAG_BAD_CALIBRATION = 4  # INFOBITS >= 2**25: bad photometric calibration
 FLAG_NOISY_IMAGE = 8  # robust per-pixel noise in the science image > 25 DN
 FLAG_BAD_SEEING = 16  # seeing FWHM > 4 arcsec
+# Epochs listed in the archive metadata but not measured.
+FLAG_UNAVAILABLE = 32  # IRSA does not serve the file (404/410/401/403); not retried automatically
+FLAG_DOWNLOAD_FAILED = 64  # download kept failing (timeouts, 5xx); retried on the next run
 
 BAD_CALIBRATION_INFOBITS = 2**25
 MAX_SCISIGPIX_DN = 25.0

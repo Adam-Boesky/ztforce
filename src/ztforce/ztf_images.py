@@ -32,9 +32,8 @@ def query_sci_metadata_bands(
     dec: float,
     bands: Sequence[str],
     config: ZTForceConfig,
-    search_radius_deg: float = 0.01,
 ) -> dict[str, pd.DataFrame]:
-    """Query ZTF IRSA once for the science exposures covering (ra, dec) in all *bands*.
+    """Query ZTF IRSA once for the science exposures whose footprint contains (ra, dec).
 
     IRSA's cost is the spatial search, not the band filter, so one query for every
     band takes about as long as a query for any single band.
@@ -53,12 +52,10 @@ def query_sci_metadata_bands(
     last_exc: Exception | None = None
     for attempt in range(config.max_retries):
         try:
-            df = _fetch_metadata(
-                metasearch.build_query(
-                    kind="sci", radec=(ra, dec), size=search_radius_deg, sql_query=sql_query, ct="csv"
-                ),
-                config,
-            )
+            # A point search for footprints containing the target: an area search also
+            # returns exposures where it falls just off the CCD, which cannot be measured.
+            url = metasearch.build_query(kind="sci", radec=(ra, dec), sql_query=sql_query, ct="csv")
+            df = _fetch_metadata(url + "&INTERSECT=CENTER", config)
             if df is None or df.empty:
                 raise NoImagesFoundError(f"No {desc} science images found at ({ra:.5f}, {dec:.5f}).")
             if not _REQUIRED_METADATA_COLS.issubset(df.columns):
@@ -108,14 +105,13 @@ def query_sci_metadata(
     dec: float,
     band: str,
     config: ZTForceConfig,
-    search_radius_deg: float = 0.01,
 ) -> pd.DataFrame:
     """Query ZTF IRSA for all science exposures covering (ra, dec) in *band*.
 
     Returns a DataFrame sorted by obsjd ascending.
     Raises NoImagesFoundError when no images are found.
     """
-    return query_sci_metadata_bands(ra, dec, [band], config, search_radius_deg)[band]
+    return query_sci_metadata_bands(ra, dec, [band], config)[band]
 
 
 def build_sci_url(

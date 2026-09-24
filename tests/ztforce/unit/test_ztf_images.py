@@ -384,6 +384,9 @@ def test_query_sci_metadata_bands_splits_by_band_in_one_query(mock_config):
     fetch.assert_called_once()
     # All three filters requested: no filter clause is sent at all.
     assert "WHERE=&" in fetch.call_args.args[0]
+    # A point search for exposures that contain the target, not an area overlap.
+    assert fetch.call_args.args[0].endswith("&INTERSECT=CENTER")
+    assert "SIZE=" not in fetch.call_args.args[0]
     assert list(result) == ["g", "r", "i"]
     assert list(result["g"]["obsjd"]) == [1.0, 2.0]
     assert list(result["r"]["obsjd"]) == [3.0]

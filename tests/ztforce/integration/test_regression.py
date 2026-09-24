@@ -36,16 +36,16 @@ import pytest
 _RA = 199.78056
 _DEC = 30.26720
 _ZTF_G = 15.444
-_MAG_TOL = 0.30  # allowed offset from ZTF DR21; loosened until PSF accuracy is improved
-_SCATTER_MAX = 0.15  # epoch-to-epoch scatter; ZTF DR21 magrms=0.012, ztforce ~0.12
+_MAG_TOL = 0.05  # allowed offset from ZTF DR21 (measured -0.008 mag)
+_SCATTER_MAX = 0.03  # epoch-to-epoch scatter; ZTF DR21 magrms=0.012, ztforce 0.016
 _MAX_EPOCHS = 30  # cap downloads so the test completes in ~2 minutes
 _MIN_DETECTIONS = 10  # bright star — most epochs should be clean detections
 
-# Faint star (g~20): relaxed tolerances due to low SNR and crowding
+# Faint star (g~20): looser tolerance for low S/N and a crowded field
 _RA_FAINT = 130.086221
 _DEC_FAINT = 19.735330
 _ZTF_G_FAINT = 19.778
-_MAG_TOL_FAINT = 0.60  # allowed offset from ZTF DR21; crowded field + low SNR
+_MAG_TOL_FAINT = 0.10  # allowed offset from ZTF DR21 (measured -0.035 mag)
 _MIN_DETECTIONS_FAINT = 5  # many epochs will be non-detections
 
 

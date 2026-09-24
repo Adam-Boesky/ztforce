@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
@@ -12,9 +13,11 @@ from .exceptions import PSFBuildError, WCSError
 from .image import ZTFImage
 from .utils import annular_background, flux_to_ab_mag, has_nan_nearby
 
-# Annular sky background: inner/outer radius as multiples of the PSF FWHM
-_SKY_ANNULUS_INNER_FWHM = 2.0
-_SKY_ANNULUS_OUTER_FWHM = 4.0
+# Annular sky background, in pixels beyond the PSF radius: just outside the region the
+# PSF model covers, so the star's own wings are not taken as sky.  A closer annulus
+# (2-4 FWHM) biased blank-sky fluxes positive by ~0.4 sigma.
+_SKY_ANNULUS_GAP_PX = 1
+_SKY_ANNULUS_WIDTH_PX = 8
 
 
 def parse_daophot_psf(psf_fpath: str | Path) -> dict:
@@ -24,7 +27,8 @@ def parse_daophot_psf(psf_fpath: str | Path) -> dict:
     a Gaussian analytic base plus spatially-varying lookup-table residuals.
 
     Returns a dict with keys ``psf_type``, ``psf_size``, ``n_tables``,
-    ``norm_factor``, ``x_cen``, ``y_cen``, ``sigmas``, ``tables``.
+    ``norm_factor``, ``x_cen``, ``y_cen``, ``sigmas`` (the Gaussian's half-widths at
+    half-maximum in x and y, despite the name), ``tables`` (sampled every half pixel).
     Pass the result to :func:`reconstruct_psf` to get a normalised PSF stamp.
     """
     with open(psf_fpath) as f:
@@ -67,34 +71,97 @@ def parse_daophot_psf(psf_fpath: str | Path) -> dict:
     )
 
 
-def reconstruct_psf(parsed: dict, x_target: float, y_target: float) -> np.ndarray:
-    """Reconstruct the normalized PSF stamp at image position (x_target, y_target).
+def psf_radius(parsed: dict) -> int:
+    """Radius in image pixels of the region the PSF lookup tables cover.
 
-    Returns a 2D array of shape (psf_size, psf_size) normalized to sum=1.
+    DAOPHOT samples its tables at half-pixel spacing, ``NPSF = 2*(NINT(2*PSFRAD)+1)+1``
+    (``psf.f``), so a 47x47 table spans 23x23 image pixels, radius 11.
     """
-    s = parsed["psf_size"]
+    return (parsed["psf_size"] - 1) // 4
+
+
+_erf = np.vectorize(math.erf, otypes=[float])
+_LN2 = math.log(2.0)
+
+
+def _gauss_pixel_integral(d: np.ndarray, hwhm: float) -> np.ndarray:
+    """Integral of exp(-ln2 (x/hwhm)^2) over the pixel [d - 0.5, d + 0.5].
+
+    DAOPHOT's DAOERF: the Gaussian is parameterised by its half-width at half-maximum
+    and integrated over each pixel rather than sampled at its centre.
+    """
+    sigma = hwhm / math.sqrt(2.0 * _LN2)
+    k = math.sqrt(2.0) * sigma
+    return sigma * math.sqrt(math.pi / 2.0) * (_erf((d + 0.5) / k) - _erf((d - 0.5) / k))
+
+
+def _catmull_rom(f1, f2, f3, f4, t):
+    """Cubic through f2..f3 at fraction t, as in DAOPHOT's BICUBC."""
+    c1 = 0.5 * (f3 - f1)
+    c2 = 3.0 * (f3 - f2 - c1) - 0.5 * (f4 - f2) + c1
+    c3 = f3 - f2 - c1 - c2
+    return ((c3 * t + c2) * t + c1) * t + f2
+
+
+def _bicubic(table: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Interpolate ``table[row, col]`` at fractional (col=u, row=v), DAOPHOT BICUBC style.
+
+    Points whose 4x4 neighbourhood leaves the table get 0.
+    """
+    n = table.shape[0]
+    lx, ly = np.floor(u).astype(int), np.floor(v).astype(int)
+    tx, ty = u - lx, v - ly
+
+    def at(r, c):
+        ok = (r >= 0) & (r < n) & (c >= 0) & (c < n)
+        return np.where(ok, table[np.clip(r, 0, n - 1), np.clip(c, 0, n - 1)], 0.0)
+
+    r0, r1, r2, r3 = (
+        _catmull_rom(at(ly + j, lx - 1), at(ly + j, lx), at(ly + j, lx + 1), at(ly + j, lx + 2), tx)
+        for j in (-1, 0, 1, 2)
+    )
+    return _catmull_rom(r0, r1, r2, r3, ty)
+
+
+def reconstruct_psf(
+    parsed: dict, x_target: float, y_target: float, frac_x: float = 0.0, frac_y: float = 0.0
+) -> np.ndarray:
+    """Reconstruct the normalized PSF stamp for a star at image position (x_target, y_target).
+
+    The stamp is (2R+1, 2R+1), R = :func:`psf_radius`, centred on the pixel nearest the
+    star; ``frac_x``/``frac_y`` (in [-0.5, 0.5]) are the star's offset from that pixel's
+    centre, so the model is evaluated at each pixel's true distance from the star.
+    Pixels beyond R are zero, as DAOPHOT only defines the PSF within PSFRAD.  The
+    stamp is normalized to sum=1.
+    """
     sigmas = parsed["sigmas"]
     tables = parsed["tables"]
     norm_factor = parsed["norm_factor"]
     x_cen = parsed["x_cen"]
     y_cen = parsed["y_cen"]
 
-    c = s // 2
-    row, col = np.mgrid[0:s, 0:s]
+    r = psf_radius(parsed)
+    mid = (parsed["psf_size"] - 1) // 2  # table centre, 0-based
+    ky, kx = np.mgrid[-r : r + 1, -r : r + 1]
+    ddx, ddy = kx - frac_x, ky - frac_y  # each pixel's offset from the star
 
-    # Analytic Gaussian base with peak = norm_factor
-    gauss = norm_factor * np.exp(-0.5 * ((col - c) ** 2 / sigmas[0] ** 2 + (row - c) ** 2 / sigmas[1] ** 2))
+    # Analytic Gaussian base (DAOPHOT PROFIL, type GAUSSIAN): ``sigmas`` holds the
+    # half-widths at half-maximum in x and y, and the profile is pixel-integrated.
+    hx, hy = sigmas[0], sigmas[1]
+    gauss = norm_factor * _gauss_pixel_integral(ddx, hx) * _gauss_pixel_integral(ddy, hy) / (hx * hy)
 
     # Normalized position offsets in [-1, 1]
     dx = (x_target - x_cen) / x_cen
     dy = (y_target - y_cen) / y_cen
 
-    # Polynomial basis for spatial variation: [1, dx, dy] (matches 3-table DAOPhot files)
+    # Lookup-table residuals, sampled every half pixel (DAOPHOT USEPSF: XX = 2*DX + MIDDLE)
+    # and interpolated bicubically between entries.
+    u, v = 2.0 * ddx + mid, 2.0 * ddy + mid
     weights = _poly_weights(dx, dy, parsed["n_tables"])
-    residual = sum(w * t for w, t in zip(weights, tables, strict=False))
+    residual = sum(w * _bicubic(t, u, v) for w, t in zip(weights, tables, strict=False))
 
     psf = gauss + residual
-    psf = np.clip(psf, 0.0, None)
+    psf = np.where(np.hypot(ddx, ddy) <= r, np.clip(psf, 0.0, None), 0.0)
     total = psf.sum()
     if total == 0:
         raise PSFBuildError("PSF reconstruction produced an all-zero stamp.")
@@ -104,19 +171,12 @@ def reconstruct_psf(parsed: dict, x_target: float, y_target: float) -> np.ndarra
 def _poly_weights(dx: float, dy: float, n: int) -> list[float]:
     """Return polynomial basis weights for n lookup tables.
 
-    Follows the DAOPHOT spatial-variation convention (Stetson 1987, PASP, 99, 191):
+    Follows DAOPHOT's USEPSF (Stetson 1987, PASP, 99, 191):
       n=1: [1]
       n=3: [1, dx, dy]
-      n=6: [1, dx, dy, dx^2, dx*dy, dy^2]
+      n=6: [1, dx, dy, 1.5 dx^2 - 0.5, dx*dy, 1.5 dy^2 - 0.5]
     """
-    if n == 1:
-        return [1.0]
-    if n == 3:
-        return [1.0, dx, dy]
-    if n == 6:
-        return [1.0, dx, dy, dx * dx, dx * dy, dy * dy]
-    # Generic: fill as many terms as available from the degree-2 expansion
-    basis = [1.0, dx, dy, dx * dx, dx * dy, dy * dy]
+    basis = [1.0, dx, dy, 1.5 * dx * dx - 0.5, dx * dy, 1.5 * dy * dy - 0.5]
     return basis[:n]
 
 
@@ -155,31 +215,33 @@ def forced_phot_at_position(
 
     # Integer center pixel (cutout-local for array indexing)
     xi, yi = int(round(x0)), int(round(y0))
-    psf_size = parsed_psf["psf_size"]
-    half = psf_size // 2
+    half = psf_radius(parsed_psf)  # fit box: the region the PSF model covers
+    sky_inner = half + _SKY_ANNULUS_GAP_PX
+    sky_half = sky_inner + _SKY_ANNULUS_WIDTH_PX  # box holding the sky annulus
     ny, nx = image.data.shape
 
     # Reject if too close to edge
-    if xi - half < 0 or xi + half + 1 > nx or yi - half < 0 or yi + half + 1 > ny:
+    if xi - sky_half < 0 or xi + sky_half + 1 > nx or yi - sky_half < 0 or yi + sky_half + 1 > ny:
         return nan_result
 
     # Reject if any NaN within PSF footprint
     if has_nan_nearby(yi, xi, half, image.nan_mask):
         return nan_result
 
-    # Extract raw cutout; estimate and subtract local sky from an annulus
-    raw_cutout = image.data[yi - half : yi + half + 1, xi - half : xi + half + 1].copy()
+    # Estimate the local sky from an annulus, then cut out the fit box
+    sky_box = image.data[yi - sky_half : yi + sky_half + 1, xi - sky_half : xi + sky_half + 1]
     sky_level, sky_rms = annular_background(
-        raw_cutout,
-        float(half),
-        float(half),
-        _SKY_ANNULUS_INNER_FWHM * image.fwhm,
-        _SKY_ANNULUS_OUTER_FWHM * image.fwhm,
+        sky_box,
+        float(sky_half),
+        float(sky_half),
+        float(sky_inner),
+        float(sky_half),
     )
+    raw_cutout = image.data[yi - half : yi + half + 1, xi - half : xi + half + 1]
     cutout = raw_cutout - sky_level
 
     # PSF model uses full-quadrant coordinates for the spatially-varying polynomial
-    psf_stamp = reconstruct_psf(parsed_psf, x0_full, y0_full)
+    psf_stamp = reconstruct_psf(parsed_psf, x0_full, y0_full, x0 - xi, y0 - yi)
 
     # Noise model: Poisson + sky background variance
     fallback_var = max(sky_rms**2, 1.0)

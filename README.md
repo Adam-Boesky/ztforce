@@ -83,6 +83,10 @@ Epochs failing the [ZFPS](https://irsa.ipac.caltech.edu/data/ZTF/docs/ztf_zfps_u
 
 **Uncertainties are statistical only and so underestimated**, especially for bright sources (calibration/PSF systematics) and sources on extended hosts (the fit is on science images, not difference images).
 
+### Accuracy
+
+For isolated stars, ztforce reproduces the fluxes in ZTF's own per-image PSF catalogs (`psfcat`, same pixels and PSF) to within ~1%, with ~1% scatter and reduced χ² ≈ 1, and blank sky comes out consistent with zero. `tests/ztforce/integration/test_psfcat_agreement.py` checks this on frozen real data from several fields, quadrants, bands and seeing conditions.
+
 ## Related services
 
 Several official ZTF services offer complementary photometry — ztforce fills a gap none of them cover:

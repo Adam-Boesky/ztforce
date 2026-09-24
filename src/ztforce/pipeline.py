@@ -82,10 +82,15 @@ def _process_one_epoch(
     band: str,
     image_id: str,
     config: ZTForceConfig,
+    full_crpix: tuple[float, float] | None = None,
 ) -> dict:
-    """Run forced PSF photometry for one epoch. Returns a result dict."""
+    """Run forced PSF photometry for one epoch. Returns a result dict.
+
+    ``full_crpix`` is the CRPIX of the full quadrant the cutout came from (archive
+    metadata), needed to evaluate the spatially varying PSF at the right place.
+    """
     try:
-        img = ZTFImage(fits_fpath, band, config)
+        img = ZTFImage(fits_fpath, band, config, full_crpix=full_crpix)
         parsed_psf = parse_daophot_psf(psf_fpath)
         coord = SkyCoord(ra=ra, dec=dec, unit="deg")
         result = forced_phot_at_position(img, parsed_psf, coord)
@@ -253,8 +258,13 @@ def run_forced_photometry(
                     image_id = (
                         f"{int(row['field'])}-{int(row['ccdid'])}-{int(row['qid'])}-{float(row['obsjd']):.3f}"
                     )
+                    full_crpix = (
+                        (float(row["crpix1"]), float(row["crpix2"])) if "crpix1" in row.index else None
+                    )
                     results.append(
-                        _process_one_epoch(str(fits_p), str(psf_p), ra, dec, band, image_id, config)
+                        _process_one_epoch(
+                            str(fits_p), str(psf_p), ra, dec, band, image_id, config, full_crpix
+                        )
                     )
                     # Done with this epoch; don't hold every band's images on disk at once.
                     fits_p.unlink(missing_ok=True)

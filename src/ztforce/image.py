@@ -9,6 +9,7 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 
+from ._constants import ZTF_QUADRANT_CRPIX
 from .config import ZTForceConfig
 from .exceptions import WCSError
 
@@ -19,10 +20,18 @@ _ZTF_GAIN_PER_FRAME = 5.8
 class ZTFImage:
     """Lazy-loading wrapper around a single ZTF science FITS image."""
 
-    def __init__(self, fits_fpath: str, band: str, config: ZTForceConfig) -> None:
+    def __init__(
+        self,
+        fits_fpath: str,
+        band: str,
+        config: ZTForceConfig,
+        full_crpix: tuple[float, float] | None = None,
+    ) -> None:
         self._fpath = fits_fpath
         self.band = band
         self._config = config
+        # CRPIX of the full quadrant this image was cut from (archive metadata crpix1/2)
+        self._full_crpix = full_crpix or ZTF_QUADRANT_CRPIX
         self._header: fits.Header | None = None
         self._data: np.ndarray | None = None
         self._wcs: WCS | None = None
@@ -60,13 +69,18 @@ class ZTFImage:
     def cutout_origin(self) -> tuple[float, float]:
         """Pixel offset (x0, y0) of this cutout's origin within the full quadrant.
 
-        IRSA IBE cutouts include LTV1/LTV2 header keywords following the IRAF
-        convention where LTV is the negative of the cutout's 0-indexed starting
-        pixel: x_full = x_cutout - LTV1.  Returns (0.0, 0.0) for full images.
+        IRSA IBE cutouts carry no LTV keywords: they keep the quadrant's WCS and shift
+        CRPIX, so the offset is the full quadrant's CRPIX minus this image's.  Images
+        with IRAF LTV1/LTV2 (x_full = x_cutout - LTV1) use those instead.  Returns
+        (0.0, 0.0) for a full quadrant.
         """
-        ltv1 = float(self.header.get("LTV1", 0.0))
-        ltv2 = float(self.header.get("LTV2", 0.0))
-        return -ltv1, -ltv2
+        hdr = self.header
+        if "LTV1" in hdr or "LTV2" in hdr:
+            return -float(hdr.get("LTV1", 0.0)), -float(hdr.get("LTV2", 0.0))
+        return (
+            self._full_crpix[0] - float(hdr["CRPIX1"]),
+            self._full_crpix[1] - float(hdr["CRPIX2"]),
+        )
 
     # ── derived scalar properties ─────────────────────────────────────────────
 

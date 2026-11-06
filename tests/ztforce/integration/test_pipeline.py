@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import warnings
 from pathlib import Path
 from unittest import mock
@@ -99,6 +100,7 @@ def test_download_epoch_returns_triple(tmp_path, mock_config):
     assert result_row["field"] == row["field"]
     assert fits_p.suffix == ".fits"
     assert psf_p.suffix == ".psf"
+    assert psf_p.parent == tmp_path  # without a batch's shared store, the sidecar is the epoch's own
     mock_fits.assert_called_once()
     mock_psf.assert_called_once()
 
@@ -883,7 +885,7 @@ def test_new_lightcurve_records_query_time(tmp_path, mock_config):
 # ── run_forced_photometry_batch ───────────────────────────────────────────────
 
 
-def test_batch_delegates_to_run_per_target(mock_config):
+def test_batch_delegates_to_run_per_target(tmp_path, mock_config):
     """run_forced_photometry_batch calls run_forced_photometry once per target."""
     from ztforce.pipeline import run_forced_photometry_batch
 
@@ -892,14 +894,19 @@ def test_batch_delegates_to_run_per_target(mock_config):
         SkyCoord(ra=200.0, dec=-5.0, unit="deg"),
     ]
 
-    with mock.patch("ztforce.pipeline.run_forced_photometry", return_value={}) as mock_rfp:
-        result = run_forced_photometry_batch(targets, bands=["g"], config=mock_config, show_progress=False)
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_positions", return_value=[{}, {}]),
+        mock.patch("ztforce.pipeline.run_forced_photometry", return_value={}) as mock_rfp,
+    ):
+        result = run_forced_photometry_batch(
+            targets, bands=["g"], data_dir=tmp_path, config=mock_config, show_progress=False
+        )
 
     assert mock_rfp.call_count == 2
     assert len(result) == 2
 
 
-def test_batch_passes_ra_dec_correctly(mock_config):
+def test_batch_passes_ra_dec_correctly(tmp_path, mock_config):
     """run_forced_photometry_batch passes the correct ra/dec for each target."""
     from ztforce.pipeline import run_forced_photometry_batch
 
@@ -916,14 +923,19 @@ def test_batch_passes_ra_dec_correctly(mock_config):
         )
         return {}
 
-    with mock.patch("ztforce.pipeline.run_forced_photometry", side_effect=_capture):
-        run_forced_photometry_batch(targets, bands=["g"], config=mock_config, show_progress=False)
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_positions", return_value=[{}]),
+        mock.patch("ztforce.pipeline.run_forced_photometry", side_effect=_capture),
+    ):
+        run_forced_photometry_batch(
+            targets, bands=["g"], data_dir=tmp_path, config=mock_config, show_progress=False
+        )
 
     assert calls[0][0] == pytest.approx(123.456, rel=1e-5)
     assert calls[0][1] == pytest.approx(-7.89, rel=1e-5)
 
 
-def test_batch_preserves_target_order(mock_config):
+def test_batch_preserves_target_order(tmp_path, mock_config):
     """run_forced_photometry_batch returns results in the same order as targets."""
     from ztforce.pipeline import run_forced_photometry_batch
 
@@ -936,10 +948,158 @@ def test_batch_preserves_target_order(mock_config):
         captured_ras.append(kwargs["ra"])
         return {"ra": kwargs["ra"]}
 
-    with mock.patch("ztforce.pipeline.run_forced_photometry", side_effect=_capture_order):
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_positions", return_value=[{}] * 5),
+        mock.patch("ztforce.pipeline.run_forced_photometry", side_effect=_capture_order),
+    ):
         results = run_forced_photometry_batch(
-            targets, bands=["g"], config=mock_config, n_workers=4, show_progress=False
+            targets, bands=["g"], data_dir=tmp_path, config=mock_config, n_workers=4, show_progress=False
         )
 
     result_ras = [r["ra"] for r in results]
     assert result_ras == pytest.approx(expected_ras, rel=1e-5)
+
+
+# ── batch metadata ────────────────────────────────────────────────────────────
+
+_FAKE_RESULT = dict(
+    flux=100.0,
+    flux_err=5.0,
+    mag=20.0,
+    mag_err=0.05,
+    chisq=1.0,
+    flags=0,
+    x_fit=32.0,
+    y_fit=32.0,
+    obsjd=2459000.0,
+    zero_point=26.3,
+    mag_limit=21.0,
+    image_id="x",
+    band="g",
+    infobits=0,
+    seeing=2.0,
+    scisigpix=10.0,
+)
+
+
+def _write_file(url, dest, config):
+    """Stand-in for download_fits / download_psf_sidecar: writes a file at dest."""
+    Path(dest).write_text("data")
+    return Path(dest)
+
+
+@contextlib.contextmanager
+def _mock_epoch_io():
+    """Mock an epoch's I/O (URL, both downloads, the fit); yields the download and fit mocks."""
+    with (
+        mock.patch("ztforce.pipeline.build_sci_url", return_value="http://fake/url"),
+        mock.patch("ztforce.pipeline.download_fits", side_effect=_write_file) as fits,
+        mock.patch("ztforce.pipeline.download_psf_sidecar", side_effect=_write_file) as psf,
+        mock.patch(
+            "ztforce.pipeline._process_one_epoch", side_effect=lambda *a, **k: dict(_FAKE_RESULT)
+        ) as fit,
+    ):
+        yield fits, psf, fit
+
+
+def _save_cached_lightcurve(tmp_path, config, ra, dec, band="g"):
+    """Write a one-epoch lightcurve to the cache at tmp_path with the current cache key."""
+    from ztforce.cache import lightcurve_path, make_cache
+    from ztforce.lightcurve import Lightcurve
+    from ztforce.pipeline import _cache_key
+
+    lc = Lightcurve(ra=ra, dec=dec)
+    lc.add_epoch(
+        obsjd=2459000.0, band=band, flux=1.0, flux_err=0.1, mag=20.0, mag_err=0.1, zero_point=26.0, flags=0
+    )
+    lc.cache_key = _cache_key(config, None)
+    lc.save(lightcurve_path(make_cache(tmp_path), ra, dec, band))
+
+
+def test_batch_queries_metadata_once_for_the_uncached_targets(tmp_path, mock_config):
+    """One multi-position query covers the targets the cache cannot serve; each worker gets its slice."""
+    from ztforce.pipeline import run_forced_photometry_batch
+
+    _save_cached_lightcurve(tmp_path, mock_config, 150.0, 2.0)
+    targets = [
+        SkyCoord(ra=ra, dec=dec, unit="deg") for ra, dec in [(150.0, 2.0), (200.0, -5.0), (210.0, -5.0)]
+    ]
+    per_target = [{"g": _make_metadata_row()}, {}]
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_positions", return_value=per_target) as mock_batch,
+        mock.patch("ztforce.pipeline.query_sci_metadata_bands") as mock_single,
+        mock.patch("ztforce.pipeline.run_forced_photometry", return_value={}) as mock_rfp,
+    ):
+        run_forced_photometry_batch(
+            targets, bands=["g"], data_dir=tmp_path, config=mock_config, show_progress=False
+        )
+
+    mock_batch.assert_called_once()
+    assert mock_batch.call_args.args[0] == pytest.approx([(200.0, -5.0), (210.0, -5.0)])
+    assert list(mock_batch.call_args.args[1]) == ["g"]
+    mock_single.assert_not_called()
+    calls = {round(c.kwargs["ra"]): c.kwargs for c in mock_rfp.call_args_list}
+    # The cached target: no metadata, and the wrapper's cache check handed over (no second load).
+    assert calls[150]["_metadata"] is None
+    assert list(calls[150]["_cache_state"][0]) == ["g"]
+    assert list(calls[200]["_metadata"]) == ["g"] and calls[200]["_cache_state"][3] == ["g"]
+    assert calls[210]["_metadata"] == {}
+
+
+def test_batch_metadata_query_failures(tmp_path, mock_config):
+    """No images anywhere gives every target empty metadata; an outage raises instead."""
+    from ztforce.exceptions import MetadataQueryError, NoImagesFoundError
+    from ztforce.pipeline import run_forced_photometry_batch
+
+    targets = [SkyCoord(ra=1.0, dec=1.0, unit="deg")]
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_positions", side_effect=NoImagesFoundError("none")),
+        mock.patch("ztforce.pipeline.run_forced_photometry", return_value={}) as mock_rfp,
+    ):
+        assert run_forced_photometry_batch(targets, bands=["g"], data_dir=tmp_path, config=mock_config) == [
+            {}
+        ]
+    assert mock_rfp.call_args.kwargs["_metadata"] == {}
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_positions", side_effect=MetadataQueryError("down")),
+        pytest.raises(MetadataQueryError),
+    ):
+        run_forced_photometry_batch(targets, bands=["g"], data_dir=tmp_path, config=mock_config)
+
+
+def test_run_uses_supplied_metadata_instead_of_querying(tmp_path, mock_config):
+    """run_forced_photometry with _metadata never calls the single-position search."""
+    from ztforce.pipeline import run_forced_photometry
+
+    with _mock_epoch_io(), mock.patch("ztforce.pipeline.query_sci_metadata_bands") as mock_query:
+        lcs = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g", "r"],
+            data_dir=tmp_path,
+            config=mock_config,
+            show_progress=False,
+            _metadata={"g": _make_metadata_row()},
+        )
+        empty = run_forced_photometry(
+            150.0, 3.0, bands=["g"], data_dir=tmp_path, config=mock_config, show_progress=False, _metadata={}
+        )
+
+    mock_query.assert_not_called()
+    assert list(lcs) == ["g"] and len(lcs["g"]) == 1
+    assert empty == {}
+
+
+def test_cache_message_respects_show_progress(tmp_path, mock_config, capsys):
+    """'loaded from cache' is printed only with show_progress=True."""
+    from ztforce.pipeline import run_forced_photometry
+
+    _save_cached_lightcurve(tmp_path, mock_config, 150.0, 2.0)
+    for show_progress in (False, True):
+        run_forced_photometry(
+            150.0, 2.0, bands=["g"], data_dir=tmp_path, config=mock_config, show_progress=show_progress
+        )
+        captured = capsys.readouterr()
+        assert ("loaded from cache" in captured.out + captured.err) is show_progress

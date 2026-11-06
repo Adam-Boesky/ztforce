@@ -26,6 +26,10 @@ class NoImagesFoundError(ZTForceError):
     """No ZTF science images cover the requested position."""
 
 
+class MetadataQueryError(ZTForceError):
+    """The IRSA metadata search failed on every attempt."""
+
+
 class PSFBuildError(ZTForceError):
     """PSF model could not be built or parsed for an image."""
 

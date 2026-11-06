@@ -31,13 +31,19 @@ from ._constants import (
     SKY_ANNULUS_GAP_PX,
     SKY_ANNULUS_WIDTH_PX,
 )
-from .cache import lightcurve_path, make_cache
+from .cache import CacheConfig, lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError, ProductUnavailableError
 from .image import ZTFImage
 from .lightcurve import SNT, SNU, Lightcurve
 from .psf import forced_phot_at_position, parse_daophot_psf
-from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata_bands
+from .ztf_images import (
+    build_sci_url,
+    download_fits,
+    download_psf_sidecar,
+    query_sci_metadata_bands,
+    query_sci_metadata_positions,
+)
 
 # ── Cache key ────────────────────────────────────────────────────────────────
 
@@ -76,8 +82,50 @@ def _warn_if_stale(lc: Lightcurve, path: Path, ra: float, dec: float, band: str)
         warnings.warn(
             f"({ra:.5f}, {dec:.5f}) [{band}]: cached lightcurve is {age_days:.0f} days old and "
             "misses any newer epochs; pass force_recompute=True to refresh it.",
-            stacklevel=3,
+            stacklevel=4,
         )
+
+
+def _serve_from_cache(
+    cache: CacheConfig,
+    ra: float,
+    dec: float,
+    bands: tuple[str, ...] | list[str],
+    ck: str,
+    retry_bits: int,
+    force_recompute: bool,
+    show_progress: bool,
+    warn_stale: bool = True,
+) -> tuple[dict[str, Lightcurve], dict[str, Lightcurve], dict[str, set[str]], list[str]]:
+    """Sort ``bands`` into what the cache answers and what must be fetched from IRSA.
+
+    Returns ``(lightcurves, cached, retry_ids, todo)``: bands served whole from the
+    cache; cached bands with epochs to retry, with those epochs' image ids; and every
+    band that needs the archive (the retry bands and the uncached or stale ones).
+    ``show_progress`` reports the bands loaded from the cache; ``warn_stale`` warns
+    about cached lightcurves older than CACHE_STALE_DAYS.
+    """
+    lightcurves: dict[str, Lightcurve] = {}
+    cached: dict[str, Lightcurve] = {}
+    retry_ids: dict[str, set[str]] = {}
+    todo: list[str] = []
+    for band in bands:
+        lc_fpath = lightcurve_path(cache, ra, dec, band)
+        if lc_fpath.exists() and not force_recompute:
+            lc = Lightcurve.load(lc_fpath)
+            if lc.cache_key == ck:
+                ids = {r["image_id"] for r in lc._rows if int(r["flags"]) & retry_bits}
+                if warn_stale:
+                    _warn_if_stale(lc, lc_fpath, ra, dec, band)
+                if not ids:
+                    if show_progress:
+                        tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
+                    lightcurves[band] = lc
+                    continue
+                cached[band], retry_ids[band] = lc, ids
+            # otherwise stale cache (settings changed) — fall through and recompute
+        todo.append(band)
+    return lightcurves, cached, retry_ids, todo
 
 
 # ── Per-epoch workers ────────────────────────────────────────────────────────
@@ -239,6 +287,9 @@ def run_forced_photometry(
     _tqdm_position: int = 0,
     _tqdm_leave: bool = True,
     _download_executor: ThreadPoolExecutor | None = None,
+    _metadata: dict[str, pd.DataFrame] | None = None,
+    _cache_state: tuple[dict[str, Lightcurve], dict[str, Lightcurve], dict[str, set[str]], list[str]]
+    | None = None,
 ) -> dict[str, Lightcurve]:
     """Run forced PSF photometry at (ra, dec) for all requested bands.
 
@@ -286,38 +337,28 @@ def run_forced_photometry(
         config = build_config()
 
     ck = _cache_key(config, max_epochs, measure_flagged)
-    lightcurves: dict[str, Lightcurve] = {}
 
     # Serve what the cache can; everything else is fetched together below.  A cached
     # band with epochs to retry is reused and only those epochs are fetched again.
     retry_bits = FLAG_DOWNLOAD_FAILED | (FLAG_UNAVAILABLE if retry_unavailable else 0)
-    todo: list[str] = []
-    cached: dict[str, Lightcurve] = {}
-    retry_ids: dict[str, set[str]] = {}
-    for band in bands:
-        lc_fpath = lightcurve_path(cache, ra, dec, band)
-        if lc_fpath.exists() and not force_recompute:
-            lc = Lightcurve.load(lc_fpath)
-            if lc.cache_key == ck:
-                ids = {r["image_id"] for r in lc._rows if int(r["flags"]) & retry_bits}
-                _warn_if_stale(lc, lc_fpath, ra, dec, band)
-                if not ids:
-                    if show_progress:
-                        tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
-                    lightcurves[band] = lc
-                    continue
-                cached[band], retry_ids[band] = lc, ids
-            # otherwise stale cache (settings changed) — fall through and recompute
-        todo.append(band)
-
+    # The batch wrapper has already checked the cache for its targets.
+    lightcurves, cached, retry_ids, todo = _cache_state or _serve_from_cache(
+        cache, ra, dec, bands, ck, retry_bits, force_recompute, show_progress
+    )
     if not todo:
         return lightcurves
 
     # One metadata query for every band still needed (IRSA's cost is the spatial
-    # search, so this is ~1/3 the time of querying band by band).
-    try:
-        metadata = query_sci_metadata_bands(ra, dec, todo, config)
-    except NoImagesFoundError:
+    # search, so this is ~1/3 the time of querying band by band), unless the batch
+    # wrapper already fetched this position's metadata in its multi-position query.
+    if _metadata is not None:
+        metadata = {band: df for band, df in _metadata.items() if band in todo}
+    else:
+        try:
+            metadata = query_sci_metadata_bands(ra, dec, todo, config)
+        except NoImagesFoundError:
+            metadata = {}
+    if not metadata:
         return {**lightcurves, **cached}
     queried_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -497,6 +538,10 @@ def run_forced_photometry_batch(
     ``download_workers``) is used across all active source workers so that
     concurrency is bounded at one level only.
 
+    The archive metadata for every target the cache cannot serve is fetched in one
+    multi-position query up front, which is far cheaper than IRSA's spatial search
+    once per target.
+
     Args:
         targets: Sky positions to process.
         bands: ZTF bands to process.  Any subset of ``("g", "r", "i")``.
@@ -514,6 +559,26 @@ def run_forced_photometry_batch(
     """
     if config is None:
         config = build_config()
+
+    # One metadata query for every target that needs the archive.
+    cache = make_cache(data_dir)
+    ck = _cache_key(config, None, measure_flagged)
+    retry_bits = FLAG_DOWNLOAD_FAILED | (FLAG_UNAVAILABLE if retry_unavailable else 0)
+    positions = [(float(c.ra.deg), float(c.dec.deg)) for c in targets]
+    cache_states = [
+        _serve_from_cache(cache, ra, dec, bands, ck, retry_bits, False, show_progress)
+        for ra, dec in positions
+    ]
+    uncached = [i for i, state in enumerate(cache_states) if state[3]]
+    metadata: dict[int, dict[str, pd.DataFrame]] = {}
+    if uncached:
+        if show_progress:
+            tqdm.write(f"Querying IRSA for the exposures covering {len(uncached)} positions")
+        try:
+            found = query_sci_metadata_positions([positions[i] for i in uncached], bands, config)
+        except NoImagesFoundError:
+            found = [{} for _ in uncached]
+        metadata = dict(zip(uncached, found, strict=True))
 
     # Thread-safe pool of tqdm positions 1..n_workers.
     # Position 0 is reserved for the top-level Sources bar.
@@ -542,12 +607,12 @@ def run_forced_photometry_batch(
     # One shared download pool for all source workers combined.
     with ThreadPoolExecutor(max_workers=download_workers) as dl_exec:
 
-        def _run_one(coord: SkyCoord) -> dict[str, Lightcurve]:
+        def _run_one(idx: int) -> dict[str, Lightcurve]:
             pos = _acquire_position()
             try:
                 return run_forced_photometry(
-                    ra=float(coord.ra.deg),
-                    dec=float(coord.dec.deg),
+                    ra=positions[idx][0],
+                    dec=positions[idx][1],
                     bands=bands,
                     data_dir=data_dir,
                     config=config,
@@ -557,6 +622,8 @@ def run_forced_photometry_batch(
                     _tqdm_position=pos,
                     _tqdm_leave=False,
                     _download_executor=dl_exec,
+                    _metadata=metadata.get(idx),
+                    _cache_state=cache_states[idx],
                 )
             finally:
                 _release_position(pos)
@@ -564,7 +631,7 @@ def run_forced_photometry_batch(
 
         results: list[dict[str, Lightcurve]] = [{} for _ in range(len(targets))]
         with ThreadPoolExecutor(max_workers=n_workers) as src_exec:
-            future_to_idx = {src_exec.submit(_run_one, coord): i for i, coord in enumerate(targets)}
+            future_to_idx = {src_exec.submit(_run_one, i): i for i in range(len(targets))}
             for future in as_completed(future_to_idx):
                 results[future_to_idx[future]] = future.result()
 

@@ -374,7 +374,7 @@ def _metatable(*filtercodes_and_jds):
 
 def test_query_sci_metadata_bands_splits_by_band_in_one_query(mock_config):
     """One IRSA query covers all bands; rows are split per band and sorted by obsjd."""
-    from ztforce.ztf_images import query_sci_metadata_bands
+    from ztforce.ztf_images import METADATA_COLUMNS, query_sci_metadata_bands
 
     fetch = mock.MagicMock(return_value=_metatable(("zr", 3.0), ("zg", 2.0), ("zg", 1.0), ("zi", 4.0)))
 
@@ -384,8 +384,9 @@ def test_query_sci_metadata_bands_splits_by_band_in_one_query(mock_config):
     fetch.assert_called_once()
     # All three filters requested: no filter clause is sent at all.
     assert "WHERE=&" in fetch.call_args.args[0]
-    # A point search for exposures that contain the target, not an area overlap.
-    assert fetch.call_args.args[0].endswith("&INTERSECT=CENTER")
+    # A point search for exposures that contain the target, not an area overlap,
+    # returning only the columns the pipeline reads.
+    assert fetch.call_args.args[0].endswith("&COLUMNS=" + ",".join(METADATA_COLUMNS) + "&INTERSECT=CENTER")
     assert "SIZE=" not in fetch.call_args.args[0]
     assert list(result) == ["g", "r", "i"]
     assert list(result["g"]["obsjd"]) == [1.0, 2.0]
@@ -443,3 +444,137 @@ def test_fetch_metadata_uses_timeout(mock_config):
     assert session.get.call_args.kwargs["timeout"] == _METADATA_TIMEOUT_SEC
     assert list(df.columns) == ["obsjd", "field"] and len(df) == 1
     resp.close.assert_called_once()
+
+
+# ── query_sci_metadata_positions ─────────────────────────────────────────────
+
+
+def _positions_table(*rows):
+    """Rows of (in_row_id, filtercode, obsjd), as IBE's multi-position search returns them."""
+    return pd.DataFrame(
+        [
+            {
+                "in_row_id": rid,
+                "in_ra": 1.0,
+                "in_dec": 2.0,
+                "obsjd": jd,
+                "field": 1,
+                "ccdid": 1,
+                "qid": 1,
+                "filtercode": fc,
+                "filefracday": 1,
+            }
+            for rid, fc, jd in rows
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "bands, where",
+    [(["g", "r"], "filtercode IN ('zg','zr')"), (["g", "r", "i"], None)],
+)
+def test_positions_query_posts_every_position_in_one_request(mock_config, bands, where):
+    """One POST carries the positions as an IPAC table, the pipeline's columns and the band filter."""
+    from ztforce.ztf_images import METADATA_COLUMNS, query_sci_metadata_positions
+
+    fetch = mock.MagicMock(return_value=_positions_table((1, "zg", 1.0)))
+    with mock.patch("ztforce.ztf_images._fetch_metadata", fetch):
+        query_sci_metadata_positions([(10.0, 20.0), (30.0, 40.0)], bands, mock_config)
+        assert query_sci_metadata_positions([], bands, mock_config) == []  # nothing to ask
+
+    fetch.assert_called_once()
+    form, files = fetch.call_args.kwargs["data"], fetch.call_args.kwargs["files"]
+    assert form["INTERSECT"] == "CENTER"
+    assert form["COLUMNS"] == ",".join(METADATA_COLUMNS)
+    assert form.get("WHERE") == where
+    uploaded = files["POS"][1]
+    assert uploaded.startswith("|") and "30.0" in uploaded and "40.0" in uploaded
+
+
+def test_positions_query_splits_rows_per_position_and_band(mock_config):
+    """Rows come back per position in input order, split by band and sorted; empty positions get {}."""
+    from ztforce.ztf_images import query_sci_metadata_positions
+
+    table = _positions_table((1, "zg", 2.0), (1, "zg", 1.0), (1, "zr", 3.0), (3, "zg", 5.0))
+    with mock.patch("ztforce.ztf_images._fetch_metadata", return_value=table):
+        result = query_sci_metadata_positions(
+            [(10.0, 20.0), (30.0, 40.0), (50.0, 60.0)], ["g", "r"], mock_config
+        )
+
+    assert [list(r) for r in result] == [["g", "r"], [], ["g"]]
+    assert list(result[0]["g"]["obsjd"]) == [1.0, 2.0]
+    assert "in_row_id" not in result[0]["g"].columns
+
+
+def test_positions_query_chunks_large_batches(mock_config):
+    """Positions are sent a bounded number per request, results concatenated in order."""
+    from ztforce.ztf_images import query_sci_metadata_positions
+
+    fetch = mock.MagicMock(side_effect=[_positions_table((2, "zg", 1.0)), _positions_table((1, "zg", 2.0))])
+    with (
+        mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
+        mock.patch("ztforce.ztf_images._POSITIONS_PER_QUERY", 2),
+    ):
+        result = query_sci_metadata_positions([(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)], ["g"], mock_config)
+
+    assert fetch.call_count == 2
+    assert [list(r) for r in result] == [[], ["g"], ["g"]]
+    assert float(result[2]["g"]["obsjd"][0]) == 2.0
+
+
+def test_positions_query_bad_and_empty_responses(mock_config):
+    """A malformed response (e.g. an error page) is retried; no rows anywhere is NoImagesFoundError."""
+    from ztforce.exceptions import NoImagesFoundError
+    from ztforce.ztf_images import query_sci_metadata_positions
+
+    fetch = mock.MagicMock(side_effect=[pd.DataFrame({"<html>": [1]}), _positions_table((1, "zg", 1.0))])
+    with (
+        mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
+        mock.patch("ztforce.ztf_images.time.sleep"),
+    ):
+        assert list(query_sci_metadata_positions([(1.0, 1.0)], ["g"], mock_config)[0]) == ["g"]
+    assert fetch.call_count == 2
+
+    with (
+        mock.patch("ztforce.ztf_images._fetch_metadata", return_value=pd.DataFrame()),
+        pytest.raises(NoImagesFoundError),
+    ):
+        query_sci_metadata_positions([(1.0, 1.0)], ["g"], mock_config)
+
+
+@pytest.mark.parametrize(
+    "search, expected", [("positions", "MetadataQueryError"), ("bands", "NoImagesFoundError")]
+)
+def test_search_failing_on_every_attempt(mock_config, search, expected):
+    """A batch search surfaces an outage as MetadataQueryError; the single search keeps NoImagesFoundError."""
+    from ztforce import exceptions
+    from ztforce.ztf_images import query_sci_metadata_bands, query_sci_metadata_positions
+
+    mock_config.max_retries = 2
+    with (
+        mock.patch("ztforce.ztf_images._fetch_metadata", side_effect=RuntimeError("503")) as fetch,
+        mock.patch("ztforce.ztf_images.time.sleep"),
+        pytest.raises(getattr(exceptions, expected), match="failed after 2 attempts"),
+    ):
+        if search == "positions":
+            query_sci_metadata_positions([(1.0, 1.0)], ["g"], mock_config)
+        else:
+            query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)
+    assert fetch.call_count == 2
+
+
+def test_fetch_metadata_posts_when_given_form_data(mock_config):
+    """_fetch_metadata uses POST for the multi-position search and GET otherwise."""
+    from ztforce.ztf_images import _fetch_metadata
+
+    resp = mock.MagicMock(text="obsjd,field\n1.0,2\n")
+    session = mock.MagicMock()
+    session.get.return_value = resp
+    session.post.return_value = resp
+    with mock.patch("ztforce.ztf_images._get_session", return_value=session):
+        df_get = _fetch_metadata("http://x", mock_config)
+        df_post = _fetch_metadata("http://x", mock_config, data={"ct": "csv"}, files={"POS": ("t", "x")})
+
+    assert session.get.call_count == 1 and session.post.call_count == 1
+    assert session.post.call_args.kwargs["data"] == {"ct": "csv"}
+    assert list(df_get["obsjd"]) == [1.0] and list(df_post["obsjd"]) == [1.0]

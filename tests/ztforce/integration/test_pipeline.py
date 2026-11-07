@@ -1103,3 +1103,131 @@ def test_cache_message_respects_show_progress(tmp_path, mock_config, capsys):
         )
         captured = capsys.readouterr()
         assert ("loaded from cache" in captured.out + captured.err) is show_progress
+
+
+# ── shared PSF sidecars ───────────────────────────────────────────────────────
+
+
+def test_sidecar_store_lifecycle(tmp_path, mock_config):
+    """One download per exposure; the file lives until every expected user has released it."""
+    from collections import Counter
+
+    from ztforce.pipeline import _SidecarStore
+
+    store = _SidecarStore(tmp_path, Counter({"exp1": 3}))
+    with mock.patch("ztforce.pipeline.download_psf_sidecar", side_effect=_write_file) as mock_dl:
+        path = store.fetch("exp1", "http://x/exp1.psf", mock_config)
+        assert store.fetch("exp1", "http://x/exp1.psf", mock_config) == path
+    assert mock_dl.call_count == 1
+
+    store.release("exp1")
+    assert path.exists()  # two users still to come
+    store.release("exp1", 2)  # a target releasing its unfitted epochs at once
+    assert not path.exists()
+    assert store._pending == Counter()
+
+
+def test_sidecar_store_failed_and_running_downloads(tmp_path, mock_config):
+    """A failed download is raised again without a new request; a running one is never deleted under."""
+    from collections import Counter
+
+    from ztforce.exceptions import FITSDownloadError
+    from ztforce.pipeline import _SidecarStore
+
+    store = _SidecarStore(tmp_path, Counter({"dead": 2, "slow": 1}))
+    with mock.patch(
+        "ztforce.pipeline.download_psf_sidecar", side_effect=FITSDownloadError("dead")
+    ) as mock_dl:
+        for _ in range(2):
+            with pytest.raises(FITSDownloadError):
+                store.fetch("dead", "http://x/dead.psf", mock_config)
+    assert mock_dl.call_count == 1
+
+    with mock.patch("ztforce.pipeline.download_psf_sidecar", side_effect=_write_file):
+        path = store.fetch("slow", "http://x/slow.psf", mock_config)
+    lock = store._download_locks["slow"]
+    lock.acquire()  # as if a cancelled target's download were still running
+    store.release("slow")
+    assert path.exists()  # left to the batch directory's cleanup
+    lock.release()
+
+
+def test_batch_shares_sidecars_between_targets_on_the_same_exposure(tmp_path, mock_config):
+    """Two targets on one exposure download its PSF sidecar once; cutouts are still per target."""
+    from ztforce.pipeline import run_forced_photometry_batch
+
+    targets = [SkyCoord(ra=150.0, dec=2.0, unit="deg"), SkyCoord(ra=150.01, dec=2.0, unit="deg")]
+    per_target = [{"g": _make_metadata_row()}, {"g": _make_metadata_row()}]
+
+    with (
+        mock.patch("ztforce.pipeline.query_sci_metadata_positions", return_value=per_target),
+        _mock_epoch_io() as (fits, psf, fit),
+    ):
+        results = run_forced_photometry_batch(
+            targets, bands=["g"], data_dir=tmp_path, config=mock_config, show_progress=False
+        )
+
+    assert fits.call_count == 2 and psf.call_count == 1
+    sidecars = {Path(c.args[1]) for c in fit.call_args_list}
+    assert len(sidecars) == 1 and not sidecars.pop().exists()  # shared, then removed with the batch
+    assert [len(r["g"]) for r in results] == [1, 1]
+
+
+def test_unneeded_exposures_are_released_before_downloading(tmp_path, mock_config):
+    """Exposures a target will not download (cut epochs, bands not asked for) are released up front."""
+    from collections import Counter
+
+    from ztforce.pipeline import _exposure_stem, _SidecarStore, run_forced_photometry
+
+    good, bad, other = (
+        _make_metadata_row(obsjd=2459000.0),
+        _make_metadata_row(obsjd=2459001.0),
+        _make_metadata_row(),
+    )
+    bad["filefracday"], bad["seeing"] = "20210102001234", 10.0  # fails the seeing cut
+    other["filefracday"], other["filtercode"] = "20210103001234", "zr"  # r-band, but only g is asked for
+    stems = [_exposure_stem(df.iloc[0]) for df in (good, bad, other)]
+    store = _SidecarStore(tmp_path, Counter(stems))
+    pending_at_download = []
+
+    with _mock_epoch_io() as (fits, _, _):
+
+        def _fits(url, dest, cfg):
+            pending_at_download.append(dict(store._pending))
+            return _write_file(url, dest, cfg)
+
+        fits.side_effect = _fits
+        lcs = run_forced_photometry(
+            150.0,
+            2.0,
+            bands=["g"],
+            data_dir=tmp_path,
+            config=mock_config,
+            show_progress=False,
+            _metadata={"g": pd.concat([good, bad], ignore_index=True), "r": other},
+            _sidecars=store,
+        )
+
+    assert pending_at_download == [{stems[0]: 1}]  # the cut and r-band exposures were already released
+    assert store._pending == Counter()
+    assert len(lcs["g"]) == 2  # the cut epoch is kept as a flagged row
+
+
+def test_exposure_uses_matches_row_wise_stems():
+    """The column-wise exposure count agrees with _exposure_stem row by row."""
+    from collections import Counter
+
+    from ztforce.pipeline import _exposure_stem, _exposure_uses
+
+    df = pd.DataFrame(
+        {
+            "filefracday": [20250611238924.0, 20250611238924.0, 20210328347812.0],
+            "field": [673.0, 673, 1671],
+            "ccdid": [1, 1, 11],
+            "qid": [4, 4, 4],
+            "filtercode": ["zr", "zr", "zg"],
+        }
+    )
+    expected = Counter(_exposure_stem(row) for _, row in df.iterrows())
+    assert _exposure_uses({"r": df, "g": pd.DataFrame(columns=df.columns)}) == expected
+    assert "20250611238924_673_zr_1_4" in expected

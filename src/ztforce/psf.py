@@ -9,7 +9,14 @@ from pathlib import Path
 import numpy as np
 from astropy.coordinates import SkyCoord
 
-from ._constants import FLAG_FIT_FAILED, FLAG_SATURATED, SKY_ANNULUS_GAP_PX, SKY_ANNULUS_WIDTH_PX
+from ._constants import (
+    FLAG_FIT_FAILED,
+    FLAG_SATURATED,
+    PSF_FIT_RADIUS_MAX_PX,
+    PSF_FIT_RADIUS_MIN_PX,
+    SKY_ANNULUS_GAP_PX,
+    SKY_ANNULUS_WIDTH_PX,
+)
 from .exceptions import PSFBuildError, WCSError
 from .image import ZTFImage
 from .utils import annular_background, flux_to_ab_mag, has_nan_nearby
@@ -175,21 +182,51 @@ def _poly_weights(dx: float, dy: float, n: int) -> list[float]:
     return basis[:n]
 
 
+def fit_radius_px(parsed: dict) -> float:
+    """DAOPhot fitting radius for this PSF, in pixels.
+
+    ZTF sets its DAOPhot/AllStar fitting radius from the image FWHM as
+    ``FI = min(7, max[3, FW])`` (Masci et al. 2017, PASP 129, 014002, eq. 45; the ZTF
+    Explanatory Supplement refers to that paper for its DAOPhot PSF step).  The FWHM is
+    taken from the sidecar's own Gaussian, whose two parameters are half-widths at
+    half-maximum, so it is available even when the image header carries no seeing.
+    """
+    fwhm = float(parsed["sigmas"][0] + parsed["sigmas"][1])
+    return min(PSF_FIT_RADIUS_MAX_PX, max(PSF_FIT_RADIUS_MIN_PX, fwhm))
+
+
+def _fit_taper(r_px: np.ndarray, fit_radius: float) -> np.ndarray:
+    """DAOPhot's radial fit weight: 1 at the star, falling to 0 at the fitting radius.
+
+    Stetson (1987, PASP, 99, 191) describes the weights as falling "from a value of
+    unity at the position of the centroid of the star to identically zero at the fitting
+    radius"; the form ``5 / (5 + r² / (1 - r²))`` with ``r`` in units of the fitting
+    radius is the one used in DAOPHOT II's PEAK/NSTAR/ALLSTAR routines.
+    """
+    u = (r_px / fit_radius) ** 2
+    return np.where(u < 1.0, 5.0 / (5.0 + u / np.clip(1.0 - u, 1e-9, None)), 0.0)
+
+
 def forced_phot_at_position(
     image: ZTFImage,
     parsed_psf: dict,
     target_coord: SkyCoord,
+    core_taper: bool = True,
 ) -> dict:
     """Measure forced PSF photometry at a fixed sky position.
 
-    Only the amplitude is free; position is locked.  Uses the optimal
-    matched-filter estimator (Naylor 1998, MNRAS, 296, 339):
-    ``flux = Σ(data·psf/σ²) / Σ(psf²/σ²)``.
+    Only the amplitude is free; position is locked.  Uses the matched-filter
+    estimator (Naylor 1998, MNRAS, 296, 339), ``flux = Σ(data·psf·w) / Σ(psf²·w)`` with
+    ``w = T(r) / σ²``.  With ``core_taper`` (the default) ``T`` is DAOPhot's radial weight
+    inside ZTF's fitting radius (see :func:`fit_radius_px` and :func:`_fit_taper`), so
+    the amplitude is set by the core, as in the PSF fit behind ZTF's own catalogs, and
+    light from neighbours or an extended host in the outer PSF box is not counted.
+    With ``core_taper=False`` ``T = 1`` over the whole PSF box.
 
     Returns a dict with keys ``flux``, ``flux_err``, ``mag``, ``mag_err``,
     ``chisq``, ``flags``, ``x_fit``, ``y_fit``.  ``chisq`` is the reduced chi-squared
-    of the fit over the PSF footprint.  ``FLAG_FIT_FAILED`` means the position was too
-    close to the image edge or a NaN region.
+    of the fit over the PSF footprint.  ``FLAG_FIT_FAILED`` means the position
+    was too close to the image edge or a NaN region.
     """
     nan_result = dict(
         flux=float("nan"),
@@ -247,17 +284,25 @@ def forced_phot_at_position(
     noise_var = sky_rms**2 + np.abs(cutout) / image.gain
     noise_var = np.where(noise_var > 0, noise_var, fallback_var)
 
-    # Matched-filter flux estimator (optimal for Gaussian noise)
-    w = psf_stamp / noise_var
+    # Fit weights: matched filter, tapered towards the core inside the fitting radius
+    if core_taper:
+        ky, kx = np.mgrid[-half : half + 1, -half : half + 1]
+        r_px = np.hypot(kx - (x0 - xi), ky - (y0 - yi))
+        taper = _fit_taper(r_px, fit_radius_px(parsed_psf))
+    else:
+        taper = np.ones_like(psf_stamp)
+    w = psf_stamp * taper / noise_var
     denom = (psf_stamp * w).sum()
     if denom <= 0:
         return nan_result
 
     flux = (cutout * w).sum() / denom
-    flux_var = 1.0 / denom
+    # Var(Σ d·w) / denom² with Var(d) = σ²; equals 1 / denom only for the untapered filter.
+    flux_var = float((w**2 * noise_var).sum()) / denom**2
     flux_err = float(np.sqrt(flux_var))
     flux = float(flux)
-    # Reduced chi-squared of the amplitude-only fit (one free parameter).
+    # Reduced chi-squared of the amplitude-only fit (one free parameter) over the whole
+    # PSF footprint, whichever pixels carried weight in the fit.
     chisq = float((((cutout - flux * psf_stamp) ** 2) / noise_var).sum() / (cutout.size - 1))
 
     mag, mag_err = flux_to_ab_mag(flux, image.zero_point, flux_err)

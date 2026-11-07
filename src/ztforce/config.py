@@ -37,6 +37,10 @@ class ZTForceConfig:
     # Gain fallback when GAIN header is absent
     default_gain: float = 6.2
 
+    # Weight the PSF fit towards the core with DAOPhot's radial taper inside ZTF's fitting
+    # radius (see psf.forced_phot_at_position).  False fits the whole PSF box uniformly.
+    psf_fit_taper: bool = True
+
 
 def _load_toml(path: Path) -> dict:
     """Load a TOML file; return {} if absent or unreadable."""

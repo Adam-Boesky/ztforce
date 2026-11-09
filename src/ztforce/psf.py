@@ -135,6 +135,11 @@ def reconstruct_psf(
     centre, so the model is evaluated at each pixel's true distance from the star.
     Pixels beyond R are zero, as DAOPHOT only defines the PSF within PSFRAD.  The
     stamp is normalized to sum=1.
+
+    Negative values are kept.  The lookup tables pull the model slightly below zero in
+    the wings (up to ~1% of the total in sharp seeing); DAOPHOT's USEPSF keeps them, and
+    so does ZTF's own rendering of the same model (``sciimgdaopsfcent.fits``).  Zeroing
+    them before normalising lowers the core and biases fitted fluxes high by up to ~1.3%.
     """
     sigmas = parsed["sigmas"]
     tables = parsed["tables"]
@@ -162,11 +167,10 @@ def reconstruct_psf(
     weights = _poly_weights(dx, dy, parsed["n_tables"])
     residual = sum(w * _bicubic(t, u, v) for w, t in zip(weights, tables, strict=False))
 
-    psf = gauss + residual
-    psf = np.where(np.hypot(ddx, ddy) <= r, np.clip(psf, 0.0, None), 0.0)
+    psf = np.where(np.hypot(ddx, ddy) <= r, gauss + residual, 0.0)
     total = psf.sum()
-    if total == 0:
-        raise PSFBuildError("PSF reconstruction produced an all-zero stamp.")
+    if not total > 0:
+        raise PSFBuildError("PSF reconstruction produced a stamp with non-positive total flux.")
     return psf / total
 
 

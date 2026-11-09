@@ -96,13 +96,25 @@ def test_reconstruct_sums_to_one(synthetic_psf_file):
     assert abs(psf.sum() - 1.0) < 1e-6
 
 
-def test_reconstruct_non_negative(synthetic_psf_file):
-    """Reconstructed PSF has no negative values (clipped)."""
+def test_reconstruct_keeps_negative_lobes(synthetic_psf_file):
+    """Negative wings of the lookup table are kept, as in DAOPHOT, not clipped to zero."""
     from ztforce.psf import parse_daophot_psf, reconstruct_psf
 
     parsed = parse_daophot_psf(synthetic_psf_file)
+    clean = reconstruct_psf(parsed, parsed["x_cen"], parsed["y_cen"])
+    # Push a ring of the table below zero, where the Gaussian has died away.
+    n = parsed["psf_size"]
+    yy, xx = np.mgrid[:n, :n]
+    ring = np.abs(np.hypot(xx - (n - 1) / 2, yy - (n - 1) / 2) - 16) < 2  # ~8 px from the star
+    parsed["tables"] = parsed["tables"].copy()
+    parsed["tables"][0][ring] -= 0.01 * parsed["norm_factor"]
     psf = reconstruct_psf(parsed, parsed["x_cen"], parsed["y_cen"])
-    assert psf.min() >= 0.0
+
+    assert psf.min() < 0
+    assert psf.sum() == pytest.approx(1.0)
+    # Keeping the negative mass raises the normalised core relative to the clean model.
+    c = psf.shape[0] // 2
+    assert psf[c, c] > clean[c, c]
 
 
 def test_reconstruct_peak_near_center(synthetic_psf_file):
@@ -151,12 +163,12 @@ def test_poly_weights_n6():
     assert result == pytest.approx([1.0, dx, dy, 1.5 * dx * dx - 0.5, dx * dy, 1.5 * dy * dy - 0.5])
 
 
-def test_reconstruct_all_zero_raises(tmp_path):
-    """PSFBuildError is raised when reconstruction produces an all-zero stamp."""
+def test_reconstruct_non_positive_total_raises(tmp_path):
+    """PSFBuildError is raised when the reconstructed stamp has no positive total flux."""
     from ztforce.exceptions import PSFBuildError
     from ztforce.psf import parse_daophot_psf, reconstruct_psf
 
-    # Build a PSF where gauss + residuals will be entirely negative → clipped to zero
+    # Build a PSF where gauss + residuals is negative everywhere
     psf_size = 3
     norm_factor = -1000.0  # negative norm → Gaussian is negative everywhere
     header = f" GAUSSIAN  {psf_size:3d}    2    1    0   14.000  {norm_factor:12.3f}  1535.5  1539.5\n"
@@ -167,7 +179,7 @@ def test_reconstruct_all_zero_raises(tmp_path):
     path.write_text(header + sigmas_line + zeros + "\n")
 
     parsed = parse_daophot_psf(path)
-    with pytest.raises(PSFBuildError, match="all-zero"):
+    with pytest.raises(PSFBuildError, match="non-positive"):
         reconstruct_psf(parsed, 1535.5, 1539.5)
 
 

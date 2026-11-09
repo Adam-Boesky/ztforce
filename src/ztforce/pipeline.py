@@ -55,6 +55,7 @@ def _cache_key(config: ZTForceConfig, max_epochs: int | None, measure_flagged: b
         "photometry_version": _PHOTOMETRY_VERSION,
         "cutout_size_arcmin": config.cutout_size_arcmin,
         "default_gain": config.default_gain,
+        "psf_fit_taper": config.psf_fit_taper,
         "max_epochs": max_epochs,
         "measure_flagged": measure_flagged,
         # Stored per-epoch results (detection, upper_limit, flags) depend on these.
@@ -279,7 +280,7 @@ def _process_one_epoch(
         img = ZTFImage(fits_fpath, band, config, full_crpix=full_crpix)
         parsed_psf = parse_daophot_psf(psf_fpath)
         coord = SkyCoord(ra=ra, dec=dec, unit="deg")
-        result = forced_phot_at_position(img, parsed_psf, coord)
+        result = forced_phot_at_position(img, parsed_psf, coord, core_taper=config.psf_fit_taper)
         result["obsjd"] = img.obs_jd
         result["zero_point"] = img.zero_point
         result["mag_limit"] = img.mag_limit

@@ -96,13 +96,25 @@ def test_reconstruct_sums_to_one(synthetic_psf_file):
     assert abs(psf.sum() - 1.0) < 1e-6
 
 
-def test_reconstruct_non_negative(synthetic_psf_file):
-    """Reconstructed PSF has no negative values (clipped)."""
+def test_reconstruct_keeps_negative_lobes(synthetic_psf_file):
+    """Negative wings of the lookup table are kept, as in DAOPHOT, not clipped to zero."""
     from ztforce.psf import parse_daophot_psf, reconstruct_psf
 
     parsed = parse_daophot_psf(synthetic_psf_file)
+    clean = reconstruct_psf(parsed, parsed["x_cen"], parsed["y_cen"])
+    # Push a ring of the table below zero, where the Gaussian has died away.
+    n = parsed["psf_size"]
+    yy, xx = np.mgrid[:n, :n]
+    ring = np.abs(np.hypot(xx - (n - 1) / 2, yy - (n - 1) / 2) - 16) < 2  # ~8 px from the star
+    parsed["tables"] = parsed["tables"].copy()
+    parsed["tables"][0][ring] -= 0.01 * parsed["norm_factor"]
     psf = reconstruct_psf(parsed, parsed["x_cen"], parsed["y_cen"])
-    assert psf.min() >= 0.0
+
+    assert psf.min() < 0
+    assert psf.sum() == pytest.approx(1.0)
+    # Keeping the negative mass raises the normalised core relative to the clean model.
+    c = psf.shape[0] // 2
+    assert psf[c, c] > clean[c, c]
 
 
 def test_reconstruct_peak_near_center(synthetic_psf_file):
@@ -151,12 +163,12 @@ def test_poly_weights_n6():
     assert result == pytest.approx([1.0, dx, dy, 1.5 * dx * dx - 0.5, dx * dy, 1.5 * dy * dy - 0.5])
 
 
-def test_reconstruct_all_zero_raises(tmp_path):
-    """PSFBuildError is raised when reconstruction produces an all-zero stamp."""
+def test_reconstruct_non_positive_total_raises(tmp_path):
+    """PSFBuildError is raised when the reconstructed stamp has no positive total flux."""
     from ztforce.exceptions import PSFBuildError
     from ztforce.psf import parse_daophot_psf, reconstruct_psf
 
-    # Build a PSF where gauss + residuals will be entirely negative → clipped to zero
+    # Build a PSF where gauss + residuals is negative everywhere
     psf_size = 3
     norm_factor = -1000.0  # negative norm → Gaussian is negative everywhere
     header = f" GAUSSIAN  {psf_size:3d}    2    1    0   14.000  {norm_factor:12.3f}  1535.5  1539.5\n"
@@ -167,7 +179,7 @@ def test_reconstruct_all_zero_raises(tmp_path):
     path.write_text(header + sigmas_line + zeros + "\n")
 
     parsed = parse_daophot_psf(path)
-    with pytest.raises(PSFBuildError, match="all-zero"):
+    with pytest.raises(PSFBuildError, match="non-positive"):
         reconstruct_psf(parsed, 1535.5, 1539.5)
 
 
@@ -192,8 +204,11 @@ def test_poly_weights_generic_n5():
 # ── forced_phot_at_position ───────────────────────────────────────────────────
 
 
-def test_forced_phot_detects_injected_source(synthetic_fits_file, synthetic_psf_file, mock_config):
-    """Matched-filter flux recovers total integrated flux of an injected Gaussian."""
+@pytest.mark.parametrize("core_taper", [True, False])
+def test_forced_phot_detects_injected_source(
+    synthetic_fits_file, synthetic_psf_file, mock_config, core_taper
+):
+    """The fit recovers the total integrated flux of an injected Gaussian, tapered or not."""
     from ztforce.image import ZTFImage
     from ztforce.psf import forced_phot_at_position, parse_daophot_psf
 
@@ -205,7 +220,7 @@ def test_forced_phot_detects_injected_source(synthetic_fits_file, synthetic_psf_
     parsed_psf["tables"] = np.zeros_like(parsed_psf["tables"])  # pure Gaussian, like the injection
 
     coord = img.pixel_to_sky(float(cx), float(cy))
-    result = forced_phot_at_position(img, parsed_psf, coord)
+    result = forced_phot_at_position(img, parsed_psf, coord, core_taper=core_taper)
 
     assert result["flags"] == 0
     assert result["flux"] > 0
@@ -214,6 +229,105 @@ def test_forced_phot_detects_injected_source(synthetic_fits_file, synthetic_psf_
     expected_flux = 5000.0 * 2 * np.pi * sigma**2
     frac_err = abs(result["flux"] - expected_flux) / expected_flux
     assert frac_err < 0.03, f"Flux {result['flux']:.0f} vs expected {expected_flux:.0f}"
+
+
+def test_fit_radius_follows_ztf_rule(synthetic_psf_file):
+    """FI = min(7, max(3, FWHM px)) from the sidecar's Gaussian half-widths."""
+    from ztforce.psf import fit_radius_px, parse_daophot_psf
+
+    parsed = parse_daophot_psf(synthetic_psf_file)
+    for hwhm, expected in [(0.8, 3.0), (1.5, 3.0), (2.2, 4.4), (5.0, 7.0)]:
+        parsed["sigmas"] = [hwhm, hwhm]
+        assert fit_radius_px(parsed) == pytest.approx(expected)
+
+
+def test_fit_taper_shape():
+    """DAOPhot's weight: 1 at the star, 0 at and beyond the fitting radius, monotonic between."""
+    from ztforce.psf import _fit_taper
+
+    r = np.linspace(0.0, 4.0, 41)
+    w = _fit_taper(r, 3.0)
+    assert w[0] == pytest.approx(1.0)
+    assert np.all(np.diff(w[r < 3.0]) <= 0)
+    assert np.all(w[r >= 3.0] == 0.0)
+    assert 0.0 < w[np.searchsorted(r, 1.5)] < 1.0
+
+
+def test_forced_phot_taper_halves_neighbour_contamination(
+    synthetic_fits_file, synthetic_psf_file, mock_config
+):
+    """A bright neighbour just outside the fitting radius biases the tapered fit half as much."""
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+    from ztforce.psf import fit_radius_px, forced_phot_at_position, parse_daophot_psf
+
+    path, cx, cy = synthetic_fits_file
+    parsed_psf = parse_daophot_psf(synthetic_psf_file)
+    parsed_psf["sigmas"] = [1.5, 1.5]
+    parsed_psf["tables"] = np.zeros_like(parsed_psf["tables"])
+    img = ZTFImage(str(path), "g", mock_config)
+    coord = img.pixel_to_sky(float(cx), float(cy))
+    clean = forced_phot_at_position(img, parsed_psf, coord, core_taper=True)["flux"]
+
+    # Neighbour four times the star's peak, 1.8 fitting radii away: inside the 23-px PSF
+    # box, outside the taper, but with wings that still reach the core.
+    sep = 1.8 * fit_radius_px(parsed_psf)
+    with fits.open(path, mode="update") as hdul:
+        yy, xx = np.mgrid[: hdul[0].data.shape[0], : hdul[0].data.shape[1]]
+        sigma = 3.0 / 2.355
+        hdul[0].data += 20000.0 * np.exp(-((xx - (cx + sep)) ** 2 + (yy - cy) ** 2) / (2 * sigma**2))
+    img = ZTFImage(str(path), "g", mock_config)
+    bias_taper = forced_phot_at_position(img, parsed_psf, coord, core_taper=True)["flux"] / clean - 1
+    bias_full = forced_phot_at_position(img, parsed_psf, coord, core_taper=False)["flux"] / clean - 1
+
+    assert bias_full > 0.03
+    assert 0 < bias_taper < 0.6 * bias_full
+
+
+def test_forced_phot_flux_err_matches_scatter(synthetic_psf_file, mock_config, tmp_path):
+    """flux_err matches the scatter of the flux over pure-noise realisations, tapered or not.
+
+    A scale check: 200 realisations resolve the error to ~5%, while the tapered and untapered
+    variance formulas differ by at most ~2.5%.
+    """
+    from astropy.io import fits
+    from ztforce.image import ZTFImage
+    from ztforce.psf import forced_phot_at_position, parse_daophot_psf
+
+    parsed_psf = parse_daophot_psf(synthetic_psf_file)
+    parsed_psf["sigmas"] = [1.5, 1.5]
+    parsed_psf["tables"] = np.zeros_like(parsed_psf["tables"])
+    size, sky_sigma = 64, 10.0
+    hdr = fits.Header()
+    hdr.update(
+        CTYPE1="RA---TAN",
+        CTYPE2="DEC--TAN",
+        CRPIX1=32.5,
+        CRPIX2=32.5,
+        CRVAL1=10.0,
+        CRVAL2=20.0,
+        CD1_1=-2.8e-4,
+        CD1_2=0.0,
+        CD2_1=0.0,
+        CD2_2=2.8e-4,
+        GAIN=1e9,
+        MAGZP=26.0,
+        RADESYS="ICRS",
+    )
+    rng = np.random.default_rng(1)
+    fluxes = {True: [], False: []}
+    errs = {True: [], False: []}
+    for k in range(200):
+        path = tmp_path / f"blank_{k}.fits"
+        fits.writeto(path, rng.normal(0.0, sky_sigma, (size, size)).astype("f4"), hdr)
+        img = ZTFImage(str(path), "g", mock_config)
+        coord = img.pixel_to_sky(31.0, 31.0)
+        for taper in (True, False):
+            res = forced_phot_at_position(img, parsed_psf, coord, core_taper=taper)
+            fluxes[taper].append(res["flux"])
+            errs[taper].append(res["flux_err"])
+    for taper in (True, False):
+        assert np.std(fluxes[taper]) == pytest.approx(np.median(errs[taper]), rel=0.15)
 
 
 def test_forced_phot_returns_finite_mag(synthetic_fits_file, synthetic_psf_file, mock_config):

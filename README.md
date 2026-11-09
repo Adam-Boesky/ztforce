@@ -115,7 +115,7 @@ Each epoch is a forced fit of one amplitude at a fixed position, using the image
 
 ### Accuracy
 
-For isolated stars, ztforce reproduces the fluxes in ZTF's own per-image PSF catalogs (`psfcat`, same pixels and PSF) to within ~1%, with ~1% scatter and reduced χ² ≈ 1, and blank sky comes out consistent with zero. In the sharpest seeing (FWHM below about 2″) ztforce reads about 1% brighter than `psfcat` and the ZTF DR: its flux matches the sky-subtracted pixel sum, while ZTF's PSF-fit flux, which ZTF's zero points are calibrated on, falls slightly below it. `tests/ztforce/integration/test_psfcat_agreement.py` checks this on frozen real data from several fields, quadrants, bands and seeing conditions.
+For isolated stars, ztforce reproduces the fluxes in ZTF's own per-image PSF catalogs (`psfcat`, same pixels and PSF) to within ~1%, with ~1% scatter and reduced χ² ≈ 1, and blank sky comes out consistent with zero.
 
 ## Related services
 

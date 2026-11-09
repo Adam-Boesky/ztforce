@@ -542,25 +542,35 @@ def test_positions_query_bad_and_empty_responses(mock_config):
         query_sci_metadata_positions([(1.0, 1.0)], ["g"], mock_config)
 
 
-@pytest.mark.parametrize(
-    "search, expected", [("positions", "MetadataQueryError"), ("bands", "NoImagesFoundError")]
-)
-def test_search_failing_on_every_attempt(mock_config, search, expected):
-    """A batch search surfaces an outage as MetadataQueryError; the single search keeps NoImagesFoundError."""
-    from ztforce import exceptions
+def test_search_failing_on_every_attempt(mock_config):
+    """An outage is MetadataQueryError for one position; in a batch it marks only its chunk unknown."""
+    from ztforce.exceptions import MetadataQueryError
     from ztforce.ztf_images import query_sci_metadata_bands, query_sci_metadata_positions
 
     mock_config.max_retries = 2
     with (
         mock.patch("ztforce.ztf_images._fetch_metadata", side_effect=RuntimeError("503")) as fetch,
         mock.patch("ztforce.ztf_images.time.sleep"),
-        pytest.raises(getattr(exceptions, expected), match="failed after 2 attempts"),
+        pytest.raises(MetadataQueryError, match="failed after 2 attempts"),
     ):
-        if search == "positions":
-            query_sci_metadata_positions([(1.0, 1.0)], ["g"], mock_config)
-        else:
-            query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)
+        query_sci_metadata_bands(_RA, _DEC, ["g"], mock_config)
     assert fetch.call_count == 2
+
+    # The first chunk fails both attempts; the second still answers.  All chunks failing
+    # is not "no images anywhere".
+    fetch = mock.MagicMock(
+        side_effect=[RuntimeError("503"), RuntimeError("503"), _positions_table((1, "zg", 1.0))]
+    )
+    positions = [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]
+    with (
+        mock.patch("ztforce.ztf_images._fetch_metadata", fetch),
+        mock.patch("ztforce.ztf_images._POSITIONS_PER_QUERY", 2),
+        mock.patch("ztforce.ztf_images.time.sleep"),
+    ):
+        result = query_sci_metadata_positions(positions, ["g"], mock_config)
+        assert result[:2] == [None, None] and list(result[2]) == ["g"]
+        fetch.side_effect = RuntimeError("503")
+        assert query_sci_metadata_positions(positions, ["g"], mock_config) == [None] * 3
 
 
 def test_fetch_metadata_posts_when_given_form_data(mock_config):

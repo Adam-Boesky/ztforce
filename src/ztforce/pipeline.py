@@ -34,7 +34,7 @@ from ._constants import (
 )
 from .cache import CacheConfig, lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
-from .exceptions import NoImagesFoundError, ProductUnavailableError
+from .exceptions import MetadataQueryError, NoImagesFoundError, ProductUnavailableError
 from .image import ZTFImage
 from .lightcurve import SNT, SNU, Lightcurve
 from .psf import forced_phot_at_position, parse_daophot_psf
@@ -434,7 +434,11 @@ def run_forced_photometry(
     Returns:
         Dict mapping band label (``"g"``, ``"r"``, ``"i"``) to a
         :class:`~ztforce.Lightcurve`.  Bands with no available images are
-        omitted.
+        omitted, so empty sky gives the cached bands only (often ``{}``).
+
+    Raises:
+        MetadataQueryError: The IRSA metadata search failed on every attempt.  An
+            outage is not reported as empty sky; nothing is written to the cache.
     """
     cache = make_cache(data_dir)
     if config is None:
@@ -465,6 +469,8 @@ def run_forced_photometry(
     if _metadata is not None:
         metadata = {band: df for band, df in _metadata.items() if band in todo}
     else:
+        # A MetadataQueryError (outage) propagates: only empty sky means "no images".
+        # Nothing needs undoing: no shared sidecars are held without _metadata.
         try:
             metadata = query_sci_metadata_bands(ra, dec, todo, config)
         except NoImagesFoundError:
@@ -657,7 +663,7 @@ def run_forced_photometry_batch(
     show_progress: bool = True,
     measure_flagged: bool = False,
     retry_unavailable: bool = False,
-) -> list[dict[str, Lightcurve]]:
+) -> list[dict[str, Lightcurve] | MetadataQueryError]:
     """Run forced photometry for a list of SkyCoord targets in parallel.
 
     Each target is processed by a dedicated thread; results are returned in the
@@ -668,7 +674,8 @@ def run_forced_photometry_batch(
     The archive metadata for every target the cache cannot serve is fetched in one
     multi-position query up front, which is far cheaper than IRSA's spatial search
     once per target.  PSF sidecars are shared: a quadrant exposure's sidecar is
-    downloaded once however many targets fall on it.
+    downloaded once however many targets fall on it.  If part of that query fails on
+    every attempt, its targets are searched one at a time instead.
 
     Args:
         targets: Sky positions to process.
@@ -683,7 +690,10 @@ def run_forced_photometry_batch(
         retry_unavailable: See :func:`run_forced_photometry`.
 
     Returns:
-        List of band → :class:`~ztforce.Lightcurve` dicts, one per target.
+        List of band → :class:`~ztforce.Lightcurve` dicts, one per target.  A target
+        whose metadata search failed on every attempt (an IRSA outage, not empty sky)
+        gets the :class:`~ztforce.MetadataQueryError` in its place instead, with a
+        warning; the other targets still complete.
     """
     if config is None:
         config = build_config()
@@ -706,7 +716,9 @@ def run_forced_photometry_batch(
             found = query_sci_metadata_positions([positions[i] for i in uncached], bands, config)
         except NoImagesFoundError:
             found = [{} for _ in uncached]
-        metadata = dict(zip(uncached, found, strict=True))
+        # A target whose part of the query failed (None) is left out: its worker runs
+        # its own single-position search.
+        metadata = {i: m for i, m in zip(uncached, found, strict=True) if m is not None}
     # How many targets list each quadrant exposure: the shared sidecar store deletes
     # a sidecar once that many have released it.
     sidecar_users: Counter[str] = Counter()
@@ -768,11 +780,21 @@ def run_forced_photometry_batch(
                 _release_position(pos)
                 main_bar.update(1)
 
-        results: list[dict[str, Lightcurve]] = [{} for _ in range(len(targets))]
+        results: list[dict[str, Lightcurve] | MetadataQueryError] = [{} for _ in range(len(targets))]
         with ThreadPoolExecutor(max_workers=n_workers) as src_exec:
             future_to_idx = {src_exec.submit(_run_one, i): i for i in range(len(targets))}
             for future in as_completed(future_to_idx):
-                results[future_to_idx[future]] = future.result()
+                try:
+                    results[future_to_idx[future]] = future.result()
+                except MetadataQueryError as exc:
+                    results[future_to_idx[future]] = exc
 
     main_bar.close()
+    failed = [i for i, r in enumerate(results) if isinstance(r, MetadataQueryError)]
+    if failed:
+        warnings.warn(
+            f"IRSA metadata search failed for {len(failed)} of {len(targets)} targets "
+            f"(indices {failed}); their results are MetadataQueryError, retry them later.",
+            stacklevel=2,
+        )
     return results

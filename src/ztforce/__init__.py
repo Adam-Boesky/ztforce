@@ -5,6 +5,7 @@ from .config import ZTForceConfig, build_config
 from .exceptions import (
     ConfigError,
     FITSDownloadError,
+    MetadataQueryError,
     NoImagesFoundError,
     PSFBuildError,
     WCSError,
@@ -23,6 +24,7 @@ __all__ = [
     "ZTForceError",
     "ConfigError",
     "FITSDownloadError",
+    "MetadataQueryError",
     "NoImagesFoundError",
     "PSFBuildError",
     "WCSError",

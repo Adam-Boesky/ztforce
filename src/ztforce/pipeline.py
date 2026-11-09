@@ -7,6 +7,7 @@ import json
 import tempfile
 import time
 import warnings
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,13 +32,19 @@ from ._constants import (
     SKY_ANNULUS_GAP_PX,
     SKY_ANNULUS_WIDTH_PX,
 )
-from .cache import lightcurve_path, make_cache
+from .cache import CacheConfig, lightcurve_path, make_cache
 from .config import ZTForceConfig, build_config
 from .exceptions import NoImagesFoundError, ProductUnavailableError
 from .image import ZTFImage
 from .lightcurve import SNT, SNU, Lightcurve
 from .psf import forced_phot_at_position, parse_daophot_psf
-from .ztf_images import build_sci_url, download_fits, download_psf_sidecar, query_sci_metadata_bands
+from .ztf_images import (
+    build_sci_url,
+    download_fits,
+    download_psf_sidecar,
+    query_sci_metadata_bands,
+    query_sci_metadata_positions,
+)
 
 # ── Cache key ────────────────────────────────────────────────────────────────
 
@@ -77,11 +84,154 @@ def _warn_if_stale(lc: Lightcurve, path: Path, ra: float, dec: float, band: str)
         warnings.warn(
             f"({ra:.5f}, {dec:.5f}) [{band}]: cached lightcurve is {age_days:.0f} days old and "
             "misses any newer epochs; pass force_recompute=True to refresh it.",
-            stacklevel=3,
+            stacklevel=4,
         )
 
 
+def _serve_from_cache(
+    cache: CacheConfig,
+    ra: float,
+    dec: float,
+    bands: tuple[str, ...] | list[str],
+    ck: str,
+    retry_bits: int,
+    force_recompute: bool,
+    show_progress: bool,
+    warn_stale: bool = True,
+) -> tuple[dict[str, Lightcurve], dict[str, Lightcurve], dict[str, set[str]], list[str]]:
+    """Sort ``bands`` into what the cache answers and what must be fetched from IRSA.
+
+    Returns ``(lightcurves, cached, retry_ids, todo)``: bands served whole from the
+    cache; cached bands with epochs to retry, with those epochs' image ids; and every
+    band that needs the archive (the retry bands and the uncached or stale ones).
+    ``show_progress`` reports the bands loaded from the cache; ``warn_stale`` warns
+    about cached lightcurves older than CACHE_STALE_DAYS.
+    """
+    lightcurves: dict[str, Lightcurve] = {}
+    cached: dict[str, Lightcurve] = {}
+    retry_ids: dict[str, set[str]] = {}
+    todo: list[str] = []
+    for band in bands:
+        lc_fpath = lightcurve_path(cache, ra, dec, band)
+        if lc_fpath.exists() and not force_recompute:
+            lc = Lightcurve.load(lc_fpath)
+            if lc.cache_key == ck:
+                ids = {r["image_id"] for r in lc._rows if int(r["flags"]) & retry_bits}
+                if warn_stale:
+                    _warn_if_stale(lc, lc_fpath, ra, dec, band)
+                if not ids:
+                    if show_progress:
+                        tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
+                    lightcurves[band] = lc
+                    continue
+                cached[band], retry_ids[band] = lc, ids
+            # otherwise stale cache (settings changed) — fall through and recompute
+        todo.append(band)
+    return lightcurves, cached, retry_ids, todo
+
+
 # ── Per-epoch workers ────────────────────────────────────────────────────────
+
+
+def _exposure_stem(row: pd.Series) -> str:
+    """``filefracday_field_filtercode_ccdid_qid``: names one quadrant exposure's files.
+
+    filefracday identifies the exposure uniquely; field/filter/CCD/quadrant pick the
+    file within it.  (JD to 3 decimals is 86 s, and ZTF takes back-to-back exposures
+    of a field ~40 s apart, so a JD-based name let two exposures overwrite each other.)
+    """
+    return (
+        f"{int(row['filefracday'])}_{int(row['field'])}_{row['filtercode']}"
+        f"_{int(row['ccdid'])}_{int(row['qid'])}"
+    )
+
+
+def _exposure_uses(per_band: dict[str, pd.DataFrame]) -> Counter[str]:
+    """How many epochs of one target's metadata fall on each quadrant exposure."""
+    uses: Counter[str] = Counter()
+    for df in per_band.values():
+        if df.empty:
+            continue
+        # The same name _exposure_stem gives each row, built column-wise.
+        stems = (
+            df["filefracday"].astype(int).astype(str)
+            + "_"
+            + df["field"].astype(int).astype(str)
+            + "_"
+            + df["filtercode"].astype(str)
+            + "_"
+            + df["ccdid"].astype(int).astype(str)
+            + "_"
+            + df["qid"].astype(int).astype(str)
+        )
+        uses.update(stems.tolist())
+    return uses
+
+
+class _SidecarStore:
+    """PSF sidecars shared by every source in a batch: one download per quadrant exposure.
+
+    A sidecar describes the PSF of one quadrant exposure, so every target on that
+    exposure can use the same file.  ``expected`` counts the targets whose metadata
+    lists each exposure; each releases the exposure once it is done with it, and the
+    file is deleted when the last one has, so the batch never holds more sidecars than
+    its targets still need.
+    """
+
+    def __init__(self, root: Path, expected: Counter[str]) -> None:
+        self.root = root
+        self._pending = Counter(expected)
+        self._lock = Lock()
+        self._download_locks: dict[str, Lock] = {}
+        self._failed: dict[str, Exception] = {}
+
+    def fetch(self, stem: str, url: str, config: ZTForceConfig) -> Path:
+        """The sidecar file for ``stem``, downloaded from ``url`` on first use.
+
+        A download that failed is not retried for later targets on the exposure: the
+        same error is raised again, so one dead file costs one round of retries.
+        """
+        path = self.root / f"{stem}.psf"
+        with self._lock:
+            lock = self._download_locks.setdefault(stem, Lock())
+        with lock:
+            if stem in self._failed:
+                raise self._failed[stem]
+            if not path.exists():
+                try:
+                    download_psf_sidecar(url, path, config)
+                except Exception as exc:
+                    self._failed[stem] = exc
+                    raise
+        return path
+
+    def release(self, stem: str, n: int = 1) -> None:
+        """Record that ``n`` of the expected users of ``stem`` no longer need it.
+
+        The file is deleted once nobody is left, unless its download is still running
+        (a target that exits early cannot stop one): it is then left to the batch
+        directory's cleanup.
+        """
+        with self._lock:
+            self._pending[stem] -= n
+            if self._pending[stem] > 0:
+                return
+            del self._pending[stem]
+            lock = self._download_locks.pop(stem, None)
+        if lock is None or lock.acquire(blocking=False):
+            (self.root / f"{stem}.psf").unlink(missing_ok=True)
+            if lock is not None:
+                lock.release()
+
+
+def _release_sidecars(sidecars: _SidecarStore | None, pending: Counter[str]) -> None:
+    """Release every use of the shared sidecars this target still holds."""
+    if sidecars is None:
+        return
+    for stem, n in pending.items():
+        if n > 0:
+            sidecars.release(stem, n)
+    pending.clear()
 
 
 def _download_epoch(
@@ -90,24 +240,24 @@ def _download_epoch(
     ra: float,
     dec: float,
     config: ZTForceConfig,
+    sidecars: _SidecarStore | None = None,
 ) -> tuple[pd.Series, Path, Path]:
     """Download the FITS cutout and PSF sidecar for one epoch.
 
-    Raises on failure so the caller can skip this epoch.
+    The sidecar comes from ``sidecars`` when a batch shares them, so it is downloaded
+    once for every target on the exposure.  Raises on failure so the caller can skip
+    this epoch.
     """
-    # filefracday identifies the exposure uniquely; field/filter/CCD/quadrant pick the
-    # file within it.  (JD to 3 decimals is 86 s, and ZTF takes back-to-back exposures
-    # of a field ~40 s apart, so a JD-based name let two exposures overwrite each other.)
-    stem = (
-        f"{int(row['filefracday'])}_{int(row['field'])}_{row['filtercode']}"
-        f"_{int(row['ccdid'])}_{int(row['qid'])}"
-    )
+    stem = _exposure_stem(row)
     local_fits = tmp_dir / f"{stem}.fits"
-    local_psf = tmp_dir / f"{stem}.psf"
     fits_url = build_sci_url(row, ra, dec, suffix="sciimg.fits", cutout_size_arcmin=config.cutout_size_arcmin)
     psf_url = build_sci_url(row, ra, dec, suffix="sciimgdao.psf")
     download_fits(fits_url, local_fits, config)
-    download_psf_sidecar(psf_url, local_psf, config)
+    if sidecars is None:
+        local_psf = tmp_dir / f"{stem}.psf"
+        download_psf_sidecar(psf_url, local_psf, config)
+    else:
+        local_psf = sidecars.fetch(stem, psf_url, config)
     return row, local_fits, local_psf
 
 
@@ -240,6 +390,10 @@ def run_forced_photometry(
     _tqdm_position: int = 0,
     _tqdm_leave: bool = True,
     _download_executor: ThreadPoolExecutor | None = None,
+    _metadata: dict[str, pd.DataFrame] | None = None,
+    _sidecars: _SidecarStore | None = None,
+    _cache_state: tuple[dict[str, Lightcurve], dict[str, Lightcurve], dict[str, set[str]], list[str]]
+    | None = None,
 ) -> dict[str, Lightcurve]:
     """Run forced PSF photometry at (ra, dec) for all requested bands.
 
@@ -287,38 +441,36 @@ def run_forced_photometry(
         config = build_config()
 
     ck = _cache_key(config, max_epochs, measure_flagged)
-    lightcurves: dict[str, Lightcurve] = {}
 
     # Serve what the cache can; everything else is fetched together below.  A cached
     # band with epochs to retry is reused and only those epochs are fetched again.
     retry_bits = FLAG_DOWNLOAD_FAILED | (FLAG_UNAVAILABLE if retry_unavailable else 0)
-    todo: list[str] = []
-    cached: dict[str, Lightcurve] = {}
-    retry_ids: dict[str, set[str]] = {}
-    for band in bands:
-        lc_fpath = lightcurve_path(cache, ra, dec, band)
-        if lc_fpath.exists() and not force_recompute:
-            lc = Lightcurve.load(lc_fpath)
-            if lc.cache_key == ck:
-                ids = {r["image_id"] for r in lc._rows if int(r["flags"]) & retry_bits}
-                _warn_if_stale(lc, lc_fpath, ra, dec, band)
-                if not ids:
-                    if show_progress:
-                        tqdm.write(f"({ra:.3f}, {dec:.3f}) [{band}] loaded from cache")
-                    lightcurves[band] = lc
-                    continue
-                cached[band], retry_ids[band] = lc, ids
-            # otherwise stale cache (settings changed) — fall through and recompute
-        todo.append(band)
-
+    # With a batch's shared sidecars, this target counts as a user of every exposure in
+    # its metadata and releases each one when done with it (see _SidecarStore), on
+    # every way out of this function.
+    pending_sidecars: Counter[str] = Counter()
+    if _metadata is not None and _sidecars is not None:
+        pending_sidecars = _exposure_uses(_metadata)
+    # The batch wrapper has already checked the cache for its targets.
+    lightcurves, cached, retry_ids, todo = _cache_state or _serve_from_cache(
+        cache, ra, dec, bands, ck, retry_bits, force_recompute, show_progress
+    )
     if not todo:
+        _release_sidecars(_sidecars, pending_sidecars)
         return lightcurves
 
     # One metadata query for every band still needed (IRSA's cost is the spatial
-    # search, so this is ~1/3 the time of querying band by band).
-    try:
-        metadata = query_sci_metadata_bands(ra, dec, todo, config)
-    except NoImagesFoundError:
+    # search, so this is ~1/3 the time of querying band by band), unless the batch
+    # wrapper already fetched this position's metadata in its multi-position query.
+    if _metadata is not None:
+        metadata = {band: df for band, df in _metadata.items() if band in todo}
+    else:
+        try:
+            metadata = query_sci_metadata_bands(ra, dec, todo, config)
+        except NoImagesFoundError:
+            metadata = {}
+    if not metadata:
+        _release_sidecars(_sidecars, pending_sidecars)
         return {**lightcurves, **cached}
     queried_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -346,6 +498,13 @@ def run_forced_photometry(
                 keep.append(row)
         to_download[band] = pd.DataFrame(keep, columns=df.columns)
 
+    # Exposures this target will not download after all (cached bands, cut epochs,
+    # epochs outside a retry) are released now, not when the target finishes.
+    if _sidecars is not None:
+        needed = _exposure_uses(to_download)
+        _release_sidecars(_sidecars, pending_sidecars - needed)
+        pending_sidecars = needed
+
     # Use a shared executor supplied by the batch wrapper, or own one locally.
     _own_executor = _download_executor is None
     dl_exec = _download_executor or ThreadPoolExecutor(max_workers=download_workers)
@@ -371,7 +530,7 @@ def run_forced_photometry(
             # order and each is fitted and cached while the next is still downloading.
             for band, df in to_download.items():
                 futures_by_band[band] = {
-                    dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config): row
+                    dl_exec.submit(_download_epoch, row, tmp_dir, ra, dec, config, _sidecars): row
                     for _, row in df.iterrows()
                 }
 
@@ -422,7 +581,12 @@ def run_forced_photometry(
                     results.append(res)
                     # Done with this epoch; don't hold every band's images on disk at once.
                     fits_p.unlink(missing_ok=True)
-                    psf_p.unlink(missing_ok=True)
+                    if _sidecars is None:
+                        psf_p.unlink(missing_ok=True)
+                    else:
+                        stem = _exposure_stem(row)
+                        _sidecars.release(stem)
+                        pending_sidecars[stem] -= 1
                     bar.update(1)
                 bar.set_description(f"{desc_base} downloading")
 
@@ -469,6 +633,9 @@ def run_forced_photometry(
                 fut.cancel()
         if _own_executor:
             dl_exec.shutdown(wait=False)
+        # Exposures this target never fitted (cut, failed, or an early exit) are released
+        # too, so the shared sidecars are not kept for a user that will not come.
+        _release_sidecars(_sidecars, pending_sidecars)
 
     if any(unmeasured_counts.values()):
         detail = ", ".join(f"{n} {what}" for what, n in unmeasured_counts.items() if n)
@@ -498,6 +665,11 @@ def run_forced_photometry_batch(
     ``download_workers``) is used across all active source workers so that
     concurrency is bounded at one level only.
 
+    The archive metadata for every target the cache cannot serve is fetched in one
+    multi-position query up front, which is far cheaper than IRSA's spatial search
+    once per target.  PSF sidecars are shared: a quadrant exposure's sidecar is
+    downloaded once however many targets fall on it.
+
     Args:
         targets: Sky positions to process.
         bands: ZTF bands to process.  Any subset of ``("g", "r", "i")``.
@@ -515,6 +687,31 @@ def run_forced_photometry_batch(
     """
     if config is None:
         config = build_config()
+
+    # One metadata query for every target that needs the archive.
+    cache = make_cache(data_dir)
+    ck = _cache_key(config, None, measure_flagged)
+    retry_bits = FLAG_DOWNLOAD_FAILED | (FLAG_UNAVAILABLE if retry_unavailable else 0)
+    positions = [(float(c.ra.deg), float(c.dec.deg)) for c in targets]
+    cache_states = [
+        _serve_from_cache(cache, ra, dec, bands, ck, retry_bits, False, show_progress)
+        for ra, dec in positions
+    ]
+    uncached = [i for i, state in enumerate(cache_states) if state[3]]
+    metadata: dict[int, dict[str, pd.DataFrame]] = {}
+    if uncached:
+        if show_progress:
+            tqdm.write(f"Querying IRSA for the exposures covering {len(uncached)} positions")
+        try:
+            found = query_sci_metadata_positions([positions[i] for i in uncached], bands, config)
+        except NoImagesFoundError:
+            found = [{} for _ in uncached]
+        metadata = dict(zip(uncached, found, strict=True))
+    # How many targets list each quadrant exposure: the shared sidecar store deletes
+    # a sidecar once that many have released it.
+    sidecar_users: Counter[str] = Counter()
+    for per_band in metadata.values():
+        sidecar_users.update(_exposure_uses(per_band))
 
     # Thread-safe pool of tqdm positions 1..n_workers.
     # Position 0 is reserved for the top-level Sources bar.
@@ -540,15 +737,20 @@ def run_forced_photometry_batch(
         unit="source",
     )
 
-    # One shared download pool for all source workers combined.
-    with ThreadPoolExecutor(max_workers=download_workers) as dl_exec:
+    # One shared download pool for all source workers combined, and one directory of
+    # shared PSF sidecars.
+    with (
+        ThreadPoolExecutor(max_workers=download_workers) as dl_exec,
+        tempfile.TemporaryDirectory() as sidecar_dir,
+    ):
+        sidecars = _SidecarStore(Path(sidecar_dir), sidecar_users)
 
-        def _run_one(coord: SkyCoord) -> dict[str, Lightcurve]:
+        def _run_one(idx: int) -> dict[str, Lightcurve]:
             pos = _acquire_position()
             try:
                 return run_forced_photometry(
-                    ra=float(coord.ra.deg),
-                    dec=float(coord.dec.deg),
+                    ra=positions[idx][0],
+                    dec=positions[idx][1],
                     bands=bands,
                     data_dir=data_dir,
                     config=config,
@@ -558,6 +760,9 @@ def run_forced_photometry_batch(
                     _tqdm_position=pos,
                     _tqdm_leave=False,
                     _download_executor=dl_exec,
+                    _metadata=metadata.get(idx),
+                    _sidecars=sidecars if idx in metadata else None,
+                    _cache_state=cache_states[idx],
                 )
             finally:
                 _release_position(pos)
@@ -565,7 +770,7 @@ def run_forced_photometry_batch(
 
         results: list[dict[str, Lightcurve]] = [{} for _ in range(len(targets))]
         with ThreadPoolExecutor(max_workers=n_workers) as src_exec:
-            future_to_idx = {src_exec.submit(_run_one, coord): i for i, coord in enumerate(targets)}
+            future_to_idx = {src_exec.submit(_run_one, i): i for i in range(len(targets))}
             for future in as_completed(future_to_idx):
                 results[future_to_idx[future]] = future.result()
 

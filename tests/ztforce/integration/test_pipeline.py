@@ -1036,7 +1036,7 @@ def test_batch_queries_metadata_once_for_the_uncached_targets(tmp_path, mock_con
         )
 
     mock_batch.assert_called_once()
-    assert mock_batch.call_args.args[0] == pytest.approx([(200.0, -5.0), (210.0, -5.0)])
+    np.testing.assert_allclose(mock_batch.call_args.args[0], [(200.0, -5.0), (210.0, -5.0)])
     assert list(mock_batch.call_args.args[1]) == ["g"]
     mock_single.assert_not_called()
     calls = {round(c.kwargs["ra"]): c.kwargs for c in mock_rfp.call_args_list}

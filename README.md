@@ -109,9 +109,13 @@ Uncertainties are statistical (sky + Poisson). They describe the scatter of fain
 
 Lightcurves are cached per position and band. A cached lightcurve does not pick up epochs taken after it was built; ztforce warns once it is over 30 days old, and `force_recompute=True` rebuilds it.
 
+### Fit method
+
+Each epoch is a forced fit of one amplitude at a fixed position, using the image's own DAOPhot PSF (`sciimgdao.psf`), rendered as DAOPhot does including its slightly negative wings. The fit is weighted towards the core with DAOPhot's radial taper inside ZTF's fitting radius, min(7, max(3, FWHM)) px ([Masci et al. 2017](https://arxiv.org/abs/1608.01733), eq. 45), so light from neighbours or a host galaxy in the outer PSF box is not counted. `build_config(psf_fit_taper=False)` fits the whole box instead.
+
 ### Accuracy
 
-For isolated stars, ztforce reproduces the fluxes in ZTF's own per-image PSF catalogs (`psfcat`, same pixels and PSF) to within ~1%, with ~1% scatter and reduced χ² ≈ 1, and blank sky comes out consistent with zero. `tests/ztforce/integration/test_psfcat_agreement.py` checks this on frozen real data from several fields, quadrants, bands and seeing conditions.
+For isolated stars, ztforce reproduces the fluxes in ZTF's own per-image PSF catalogs (`psfcat`, same pixels and PSF) to within ~1%, with ~1% scatter and reduced χ² ≈ 1, and blank sky comes out consistent with zero.
 
 ## Related services
 

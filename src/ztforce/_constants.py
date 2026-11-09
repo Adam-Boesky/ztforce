@@ -1,6 +1,6 @@
 # Bump when the photometry algorithm changes in a way that makes existing
 # cached lightcurves stale (e.g. new background estimator, PSF fitting change).
-_PHOTOMETRY_VERSION = "7"
+_PHOTOMETRY_VERSION = "8"
 
 # CRPIX of a full ZTF CCD-quadrant science image (archive metadata crpix1/crpix2).
 # IBE cutouts carry no LTV keywords; they shift CRPIX instead, so a cutout's offset
@@ -26,6 +26,12 @@ FLAG_SATURATED = 128  # a pixel under the PSF is at or above the image's SATURAT
 BAD_CALIBRATION_INFOBITS = 2**25
 MAX_SCISIGPIX_DN = 25.0
 MAX_SEEING_ARCSEC = 4.0
+
+# PSF-fitting radius in pixels, as ZTF's own DAOPhot/AllStar run sets it from the image
+# FWHM: FI = min(7, max[3, FW]) (Masci et al. 2017, PASP 129, 014002, eq. 45).  Pixels
+# beyond it carry no weight in the fit; inside it the weight tapers to zero at the edge.
+PSF_FIT_RADIUS_MIN_PX = 3.0
+PSF_FIT_RADIUS_MAX_PX = 7.0
 
 # Sky annulus for the forced fit, in pixels beyond the PSF radius: just outside the
 # region the PSF model covers, so the star's own wings are not taken as sky.  A closer

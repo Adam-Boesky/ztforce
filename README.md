@@ -97,7 +97,7 @@ Every exposure whose footprint contains the target appears as a row, with its ZT
 | 64 | download kept failing (retried on the next run) |
 | 128 | saturated pixel under the PSF |
 
-Epochs the archive metadata already marks as bad (bits 4, 16) are not downloaded unless `measure_flagged=True`. Files IRSA does not serve (some exposures listed in its metadata have no files) are not re-requested unless `retry_unavailable=True`. A warning summarises epochs that could not be measured.
+Epochs the archive metadata already marks as bad (bits 4, 16) are not downloaded unless `measure_flagged=True`. Files IRSA does not serve (some exposures listed in its metadata have no files) are not re-requested unless `retry_unavailable=True`. A warning summarises epochs that could not be measured. If the IRSA metadata search itself keeps failing (an outage, not empty sky), `run_forced_photometry` raises `MetadataQueryError`, and `run_forced_photometry_batch` puts that error in the failed target's place, with a warning, and completes the rest.
 
 ### Stacking and uncertainties
 

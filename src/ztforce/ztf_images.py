@@ -115,7 +115,9 @@ def query_sci_metadata_bands(
     band takes about as long as a query for any single band.
 
     Returns a dict mapping band to a DataFrame sorted by obsjd ascending.  Bands with
-    no exposures are omitted.  Raises NoImagesFoundError when no band has any.
+    no exposures are omitted.  Raises NoImagesFoundError when no band has any, and
+    MetadataQueryError when the search failed on every attempt (an outage is not
+    empty sky).
     """
     filtercodes, sql_query = _band_filter(bands)
     desc = f"ZTF {'/'.join(bands)}-band at ({ra:.5f}, {dec:.5f})"
@@ -123,12 +125,7 @@ def query_sci_metadata_bands(
     # returns exposures where it falls just off the CCD, which cannot be measured.
     url = metasearch.build_query(kind="sci", radec=(ra, dec), sql_query=sql_query, ct="csv")
     url += "&COLUMNS=" + ",".join(METADATA_COLUMNS) + "&INTERSECT=CENTER"
-    try:
-        df = _search_with_retry(lambda: _fetch_metadata(url, config), _REQUIRED_METADATA_COLS, desc, config)
-    except MetadataQueryError as exc:
-        # Kept as NoImagesFoundError: a single-position run treats a failed search like
-        # an empty one and serves what it has.
-        raise NoImagesFoundError(str(exc)) from exc
+    df = _search_with_retry(lambda: _fetch_metadata(url, config), _REQUIRED_METADATA_COLS, desc, config)
     by_band = _split_by_band(df, bands, filtercodes)
     if not by_band:
         raise NoImagesFoundError(f"No {desc} science images found.")
@@ -139,7 +136,7 @@ def query_sci_metadata_positions(
     positions: Sequence[tuple[float, float]],
     bands: Sequence[str],
     config: ZTForceConfig,
-) -> list[dict[str, pd.DataFrame]]:
+) -> list[dict[str, pd.DataFrame] | None]:
     """Query ZTF IRSA for the science exposures containing each of several positions.
 
     IBE takes a table of positions in one request, which costs far less than a spatial
@@ -148,9 +145,10 @@ def query_sci_metadata_positions(
 
     Returns one band -> DataFrame dict per position, in the order given, each as
     :func:`query_sci_metadata_bands` would return it; a position with no exposures
-    gets an empty dict.  Raises NoImagesFoundError when no position has any, and
-    MetadataQueryError when a request failed on every attempt (unlike the
-    single-position search, a batch must not mistake an outage for empty sky).
+    gets an empty dict.  A request that failed on every attempt does not abort the
+    rest: its positions get ``None`` (unknown, not empty sky), for the caller to search
+    one by one with :func:`query_sci_metadata_bands`.  Raises NoImagesFoundError when
+    every request succeeded and no position has any exposures.
     """
     if not positions:
         return []
@@ -159,7 +157,7 @@ def query_sci_metadata_positions(
     if sql_query:
         form["WHERE"] = sql_query
 
-    results: list[dict[str, pd.DataFrame]] = []
+    results: list[dict[str, pd.DataFrame] | None] = []
     for start in range(0, len(positions), _POSITIONS_PER_QUERY):
         chunk = positions[start : start + _POSITIONS_PER_QUERY]
         desc = f"ZTF {'/'.join(bands)}-band at {len(chunk)} positions"
@@ -174,13 +172,16 @@ def query_sci_metadata_positions(
         except NoImagesFoundError:
             results.extend({} for _ in chunk)
             continue
+        except MetadataQueryError:
+            results.extend(None for _ in chunk)
+            continue
         # Each row carries in_row_id: the 1-based row of the uploaded table it matched.
         # (IBE adds in_row_id/in_ra/in_dec even with COLUMNS= set, and honours WHERE as
         # a form field; checked against the service on 2026-11-07.)
         for i in range(len(chunk)):
             sub = df[df["in_row_id"] == i + 1].drop(columns=["in_row_id", "in_ra", "in_dec"], errors="ignore")
             results.append(_split_by_band(sub, bands, filtercodes))
-    if not any(results):
+    if all(r is not None and not r for r in results):
         raise NoImagesFoundError(f"No ZTF {'/'.join(bands)}-band science images found at any position.")
     return results
 

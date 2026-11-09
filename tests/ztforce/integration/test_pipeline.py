@@ -331,17 +331,22 @@ def test_force_recompute_ignores_cache(tmp_path, mock_config):
     assert result == {}
 
 
-def test_no_images_returns_empty_dict(tmp_path, mock_config):
-    """run_forced_photometry returns {} when query finds no images."""
-    from ztforce.exceptions import NoImagesFoundError
+@pytest.mark.parametrize("response", [pd.DataFrame(), RuntimeError("503")], ids=["empty sky", "outage"])
+def test_no_images_vs_failed_search(tmp_path, mock_config, response):
+    """Empty sky returns {}; a search failing every attempt raises MetadataQueryError instead."""
+    from ztforce.exceptions import MetadataQueryError
     from ztforce.pipeline import run_forced_photometry
 
-    with mock.patch("ztforce.pipeline.query_sci_metadata_bands", side_effect=NoImagesFoundError("none")):
+    mock_config.max_retries = 2
+    with (
+        mock.patch("ztforce.ztf_images._fetch_metadata", side_effect=[response] * 2),
+        mock.patch("ztforce.ztf_images.time.sleep"),
+        pytest.raises(MetadataQueryError) if isinstance(response, Exception) else contextlib.nullcontext(),
+    ):
         result = run_forced_photometry(
             150.0, 2.0, bands=["g"], data_dir=tmp_path / "cache", config=mock_config, show_progress=False
         )
-
-    assert result == {}
+        assert result == {}
 
 
 # ── run_forced_photometry (mocked download + photometry) ─────────────────────
@@ -1047,9 +1052,9 @@ def test_batch_queries_metadata_once_for_the_uncached_targets(tmp_path, mock_con
     assert calls[210]["_metadata"] == {}
 
 
-def test_batch_metadata_query_failures(tmp_path, mock_config):
-    """No images anywhere gives every target empty metadata; an outage raises instead."""
-    from ztforce.exceptions import MetadataQueryError, NoImagesFoundError
+def test_batch_metadata_query_no_images(tmp_path, mock_config):
+    """No images anywhere gives every target empty metadata."""
+    from ztforce.exceptions import NoImagesFoundError
     from ztforce.pipeline import run_forced_photometry_batch
 
     targets = [SkyCoord(ra=1.0, dec=1.0, unit="deg")]
@@ -1062,11 +1067,38 @@ def test_batch_metadata_query_failures(tmp_path, mock_config):
         ]
     assert mock_rfp.call_args.kwargs["_metadata"] == {}
 
+
+def test_batch_chunk_outage_falls_back_per_target(tmp_path, mock_config):
+    """A failed chunk's targets are searched one by one; one still failing is reported alone."""
+    from ztforce.exceptions import MetadataQueryError
+    from ztforce.pipeline import run_forced_photometry_batch
+
+    def _fetch(url, config, data=None, files=None):
+        if files is not None:  # the multi-position POST
+            if "10.0" in files["POS"][1]:
+                raise RuntimeError("503")  # the (10, 10), (20, 20) chunk
+            return _make_metadata_row(field=3).assign(in_row_id=1)
+        if "POS=10.0," in url:
+            return _make_metadata_row(field=1)
+        raise RuntimeError("503")  # (20, 20) keeps failing
+
+    mock_config.max_retries = 1
+    targets = [SkyCoord(ra=v, dec=v, unit="deg") for v in (10.0, 20.0, 30.0)]
     with (
-        mock.patch("ztforce.pipeline.query_sci_metadata_positions", side_effect=MetadataQueryError("down")),
-        pytest.raises(MetadataQueryError),
+        mock.patch("ztforce.ztf_images._fetch_metadata", side_effect=_fetch),
+        mock.patch("ztforce.ztf_images._POSITIONS_PER_QUERY", 2),
+        mock.patch("ztforce.ztf_images.time.sleep"),
+        _mock_epoch_io(),
+        pytest.warns(UserWarning, match=r"failed for 1 of 3 targets \(indices \[1\]\)"),
     ):
-        run_forced_photometry_batch(targets, bands=["g"], data_dir=tmp_path, config=mock_config)
+        results = run_forced_photometry_batch(
+            targets, bands=["g"], data_dir=tmp_path, config=mock_config, show_progress=False
+        )
+
+    assert isinstance(results[1], MetadataQueryError)
+    assert [list(results[i]) for i in (0, 2)] == [["g"], ["g"]]
+    # Each from its own search: the fallback's row (field 1) and the batch row (field 3).
+    assert [list(results[i]["g"].df["field"]) for i in (0, 2)] == [[1], [3]]
 
 
 def test_run_uses_supplied_metadata_instead_of_querying(tmp_path, mock_config):

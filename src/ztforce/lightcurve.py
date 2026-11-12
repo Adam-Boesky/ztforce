@@ -155,9 +155,9 @@ class Lightcurve:
         Follows the ZFPS user guide (section 6.6): every unflagged epoch is stacked,
         detected or not, after rescaling to a common zero point.
 
-        Returns a DataFrame indexed by band with columns:
-          flux_stack, flux_err_stack, snr_stack, detection, mag_stack, mag_err_stack,
-          upper_limit_stack, n_epochs.
+        Returns a DataFrame indexed by band with columns ``flux_stack``,
+        ``flux_err_stack``, ``snr_stack``, ``detection``, ``mag_stack``, ``mag_err_stack``,
+        ``upper_limit_stack`` and ``n_epochs``.
         ``flux_stack`` and ``flux_err_stack`` are on the AB zero point ``STACK_ZERO_POINT``.
         A stack with ``snr_stack >= SNT`` is a detection with a magnitude; otherwise
         ``mag_stack`` is NaN and ``upper_limit_stack`` is its SNU-sigma limiting magnitude.

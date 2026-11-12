@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath("../src/"))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "ztforce"
-copyright = "2025, Adam Boesky"
+copyright = "2025-2026, Adam Boesky"
 author = "Adam Boesky"
 release = version("ztforce")
 # for example take major/minor
@@ -52,6 +52,7 @@ add_module_names = False
 autoapi_type = "python"
 autoapi_dirs = ["../src"]
 autoapi_ignore = ["*/__main__.py", "*/_version.py"]
+suppress_warnings = ["autoapi.python_import_resolution"]
 autoapi_add_toc_tree_entry = False
 autoapi_member_order = "bysource"
 

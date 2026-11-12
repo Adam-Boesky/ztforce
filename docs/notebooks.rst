@@ -3,4 +3,4 @@ Notebooks
 
 .. toctree::
 
-    Introducing Jupyter Notebooks <pre_executed/intro_notebook>
+    Forced photometry of SN 2023zkd <pre_executed/sn2023zkd>

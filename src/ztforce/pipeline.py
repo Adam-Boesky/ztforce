@@ -692,7 +692,7 @@ def run_forced_photometry_batch(
     Returns:
         List of band → :class:`~ztforce.Lightcurve` dicts, one per target.  A target
         whose metadata search failed on every attempt (an IRSA outage, not empty sky)
-        gets the :class:`~ztforce.MetadataQueryError` in its place instead, with a
+        gets the :class:`~ztforce.exceptions.MetadataQueryError` in its place instead, with a
         warning; the other targets still complete.
     """
     if config is None:

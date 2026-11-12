@@ -8,12 +8,18 @@ authors = [
     { name = "Adam Boesky", email = "apboesky@gmail.com" }
 ]
 description = "Forced PSF photometry on ZTF science images"
+keywords = ["astronomy", "astrophysics", "ZTF", "photometry", "forced photometry", "lightcurve"]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dynamic = ["version"]
 requires-python = ">=3.10"
@@ -29,6 +35,9 @@ dependencies = [
 
 [project.urls]
 "Source Code" = "https://github.com/Adam-Boesky/ztforce"
+"Documentation" = "https://ztforce.readthedocs.io"
+"Issue Tracker" = "https://github.com/Adam-Boesky/ztforce/issues"
+"Changelog" = "https://github.com/Adam-Boesky/ztforce/releases"
 
 # On a mac, install optional dependencies with `pip install '.[dev]'` (include the single quotes)
 [project.optional-dependencies]
@@ -43,7 +52,7 @@ dev = [
 
 [build-system]
 requires = [
-    "setuptools>=62", # Used to build and package the Python project
+    "setuptools>=77", # Used to build and package the Python project (>=77 for the PEP 639 license fields)
     "setuptools_scm>=6.2", # Gets release version from git. Makes it available programmatically
 ]
 build-backend = "setuptools.build_meta"

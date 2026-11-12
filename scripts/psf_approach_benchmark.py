@@ -37,7 +37,7 @@ center-only stamp while being far simpler than building an ePSF.
 
 Usage
 -----
-    conda run -n long_transients python scripts/psf_approach_benchmark.py
+    python scripts/psf_approach_benchmark.py
 """
 
 import time

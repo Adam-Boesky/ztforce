@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="ztforce_logo.svg" alt="ztforce logo" width="400"/>
+  <img src="https://raw.githubusercontent.com/Adam-Boesky/ztforce/main/ztforce_logo.svg" alt="ztforce logo" width="400"/>
 </p>
 
 # ztforce
@@ -10,7 +10,7 @@ Forced PSF photometry on ZTF science images — measures flux at a fixed sky pos
 [![Template](https://img.shields.io/badge/Template-LINCC%20Frameworks%20Python%20Project%20Template-brightgreen)](https://lincc-ppt.readthedocs.io/en/latest/)
 
 [![PyPI](https://img.shields.io/pypi/v/ztforce?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/ztforce/)
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/Adam-Boesky/ztforce/smoke-test.yml)](https://github.com/Adam-Boesky/ztforce/actions/workflows/smoke-test.yml)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/Adam-Boesky/ztforce/testing-and-coverage.yml?branch=main)](https://github.com/Adam-Boesky/ztforce/actions/workflows/testing-and-coverage.yml)
 [![Codecov](https://codecov.io/gh/Adam-Boesky/ztforce/branch/main/graph/badge.svg)](https://codecov.io/gh/Adam-Boesky/ztforce)
 [![Read The Docs](https://img.shields.io/readthedocs/ztforce)](https://ztforce.readthedocs.io/)
 [![DOI](https://zenodo.org/badge/1249800788.svg)](https://zenodo.org/badge/latestdoi/1249800788)
@@ -123,7 +123,7 @@ Several official ZTF services offer complementary photometry — ztforce fills a
 
 | Service | What it does | Why you'd use ztforce instead |
 |---|---|---|
-| [ZTF Forced Photometry Service (ZFPS)](https://irsa.ipac.caltech.edu/data/ZTF/docs/ztf_forced_photometry.pdf) ([Masci et al. 2023](https://arxiv.org/abs/2305.16279)) | Forced PSF photometry on ZTF **difference** images at user positions | Science-image photometry avoids subtraction artifacts; no account/queue required; runs locally |
+| [ZTF Forced Photometry Service (ZFPS)](https://irsa.ipac.caltech.edu/data/ZTF/docs/ztf_forced_photometry.pdf) ([Masci et al. 2023](https://arxiv.org/abs/2305.16279)) | Forced PSF photometry on ZTF **difference** images at user positions | Science-image photometry avoids subtraction artifacts; no request queue or email turnaround (only a free IRSA login); runs locally |
 | [ZTF DR lightcurves (IRSA)](https://irsa.ipac.caltech.edu/docs/program_interface/ztf_lightcurve_api.html) | Catalog lightcurves for sources detected in ZTF data releases | Forced photometry works for transients and sub-threshold sources not in any catalog and at any arbitrary position |
 | [ZuberCal](https://irsa.ipac.caltech.edu/data/ZTF/zubercal/overview.pdf) | Ubercalibrated PSF photometry catalog for PS1-matched ZTF sources | Only covers sources detected in PS1; ztforce works at any arbitrary position |
 
@@ -131,47 +131,24 @@ Several official ZTF services offer complementary photometry — ztforce fills a
 
 ## Citation
 
-If you find ztforce useful for your work, please cite the Zenodo release:
+If you find ztforce useful for your work, please cite the Zenodo archive. The concept DOI
+below always resolves to the latest release; the Zenodo page lists a DOI for each version
+if you need to cite the exact one you used (for example v0.6.0: 10.5281/zenodo.24090499).
 
-```
+```bibtex
 @software{Boesky2026_ztforce,
-  author       = {Adam Boesky},
-  title        = {Adam-Boesky/ztforce: v0.1.2},
-  month        = may,
-  year         = 2026,
-  publisher    = {Zenodo},
-  version      = {v0.1.2},
-  doi          = {10.5281/zenodo.20434975},
-  url          = {https://doi.org/10.5281/zenodo.20434975},
+  author    = {Adam Boesky},
+  title     = {ztforce: Forced PSF photometry on ZTF science images},
+  year      = 2026,
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.20434974},
+  url       = {https://doi.org/10.5281/zenodo.20434974},
 }
 ```
 
-## Dev Guide - Getting Started
+## Contributing
 
-Before installing any dependencies or writing code, it's a great idea to create a
-virtual environment. LINCC-Frameworks engineers primarily use `conda` to manage virtual
-environments. If you have conda installed locally, you can run the following to
-create and activate a new environment.
-
-```
->> conda create -n <env_name> python=3.11
->> conda activate <env_name>
-```
-
-Once you have created a new environment, you can install this project for local
-development using the following commands:
-
-```
->> ./.setup_dev.sh
->> conda install pandoc
-```
-
-Notes:
-1. `./.setup_dev.sh` will initialize pre-commit for this local repository, so
-   that a set of tests will be run prior to completing a local commit. For more
-   information, see the Python Project Template documentation on 
-   [pre-commit](https://lincc-ppt.readthedocs.io/en/latest/practices/precommit.html)
-2. Install `pandoc` allows you to verify that automatic rendering of Jupyter notebooks
-   into documentation for ReadTheDocs works as expected. For more information, see
-   the Python Project Template documentation on
-   [Sphinx and Python Notebooks](https://lincc-ppt.readthedocs.io/en/latest/practices/sphinx.html#python-notebooks)
+Bug reports, feature requests and pull requests are welcome on
+[GitHub](https://github.com/Adam-Boesky/ztforce/issues). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to set up a development environment, run the
+tests and build the documentation.
